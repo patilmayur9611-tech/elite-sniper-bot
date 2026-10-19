@@ -22,6 +22,11 @@ strategy = StrategyEngine(client)
 
 class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
     """Lightweight HTTP server for cloud keepalive and web monitoring."""
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+
     def do_GET(self):
         if self.path == "/health":
             self.send_response(200)
