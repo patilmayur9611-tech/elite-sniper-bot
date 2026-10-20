@@ -1,7 +1,12 @@
 """
 ========================================================================================
-ELITE PRICE ACTION & WICK PSYCHOLOGY SNIPER BOT - MAIN RUNNER
+ELITE PRICE ACTION & WICK PSYCHOLOGY SNIPER BOT - MAIN RUNNER (OPTION 2 MASTER ENGINE)
 Delta Exchange India Live/Paper Automated Trading System
+- 3M Liquidity Sweep Entry & 1H Trend Bias Alignment
+- FVG Pullback Limit Retest
+- 2-Hour Loss Cooldown & Weak Hours Filter
+- $12,000 Fee Shield Cap
+- Monthly-Stepped Compounding Engine
 ========================================================================================
 """
 import time
@@ -45,15 +50,16 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Elite Sniper Bot Dashboard</title>
+            <title>Elite Sniper Bot Dashboard (Option 2)</title>
             <meta http-equiv="refresh" content="10">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0b0e14; color: #e6edf3; padding: 25px; margin: 0; }}
-                .container {{ max-width: 900px; margin: 0 auto; }}
+                .container {{ max-width: 950px; margin: 0 auto; }}
                 .header {{ border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 20px; }}
-                .badge {{ display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: bold; }}
+                .badge {{ display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 13px; font-weight: bold; margin-right: 6px; }}
                 .badge-green {{ background: #238636; color: white; }}
                 .badge-blue {{ background: #1f6feb; color: white; }}
+                .badge-purple {{ background: #8957e5; color: white; }}
                 .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }}
                 .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; }}
                 .card-title {{ font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }}
@@ -68,12 +74,17 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🎯 Elite Price Action & Wick Psychology Sniper Bot</h2>
+                    <h2>🎯 Elite Price Action & Wick Psychology Sniper Bot (Option 2 Engine)</h2>
                     <span class="badge badge-green">STATUS: RUNNING</span>
                     <span class="badge badge-blue">MODE: {'PAPER TRADING' if config.PAPER_TRADING else 'LIVE REAL MONEY'}</span>
+                    <span class="badge badge-purple">ENGINE: 3M Entry + 1H Bias</span>
                     <span class="badge">EXCHANGE: Delta Exchange India</span>
                 </div>
                 <div class="grid">
+                    <div class="card">
+                        <div class="card-title">Month-Starting Capital ({state.get('current_month', 'Current')})</div>
+                        <div class="card-val">${state.get('month_starting_capital', config.INITIAL_CAPITAL):.2f}</div>
+                    </div>
                     <div class="card">
                         <div class="card-title">Active Trading Capital</div>
                         <div class="card-val">${state['active_capital']:.2f}</div>
@@ -92,15 +103,16 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                     </div>
                 </div>
 
-                <h3>Active Positions ({len(state.get('open_positions', {}))})</h3>
+                <h3>Active Positions ({len(state.get('open_positions', {}))}/{config.MAX_CONCURRENT_TRADES})</h3>
                 <table class="pos-table">
                     <tr>
                         <th>Asset</th><th>Side</th><th>Entry</th><th>Current SL</th><th>TP1 (1.9R)</th><th>TP2 (4.0R)</th><th>Status</th>
                     </tr>
         """
+
         positions = state.get("open_positions", {})
         if not positions:
-            html += "<tr><td colspan='7' style='text-align: center; color: #8b949e;'>No active positions. Scanning 5M charts...</td></tr>"
+            html += "<tr><td colspan='7' style='text-align: center; color: #8b949e;'>No active positions. Scanning 3M candles with 1H Trend Bias...</td></tr>"
         else:
             for sym, p in positions.items():
                 side_cls = "green" if p['side'] == 'LONG' else "red"
@@ -150,15 +162,19 @@ def run_telegram_poller():
         time.sleep(2)
 
 def main():
-    print("=" * 80)
-    print("🎯 ELITE PRICE ACTION & WICK PSYCHOLOGY SNIPER BOT")
+    print("=" * 90)
+    print("🎯 ELITE PRICE ACTION & WICK PSYCHOLOGY SNIPER BOT (OPTION 2 MASTER ENGINE)")
     print("   Exchange: Delta Exchange India (api.india.delta.exchange)")
     print(f"   Mode: {'🟢 PAPER TRADING (Virtual Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING (Live Order Placement)'}")
-    print(f"   Initial Capital: ${client.state['active_capital']:.2f} | Compounding Cap: ${config.MAX_ACTIVE_CAPITAL:,.0f}")
-    print(f"   Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.2f}% | Leverage: {config.LEVERAGE}x Isolated")
+    print(f"   Timeframes: 3-Minute Entry Candles + 1-Hour Trend Bias Alignment")
+    print(f"   Compounding Model: Monthly-Stepped (Month-Starting Capital: ${client.state.get('month_starting_capital', config.INITIAL_CAPITAL):.2f})")
+    print(f"   Active Capital: ${client.state['active_capital']:.2f} | Banked Reserve: ${client.state.get('banked_profit', 0):.2f} (Cap: ${config.MAX_ACTIVE_CAPITAL:,.0f})")
+    print(f"   Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.2f}% (Capped at ${config.MAX_ACTIVE_CAPITAL * config.RISK_PER_TRADE_PCT:,.2f})")
+    print(f"   Position Fee Shield: Capped at ${config.MAX_POSITION_USD:,.0f} USD per trade (Taker Fee ~$12 max)")
+    print(f"   Filters: 2-Hour Loss Cooldown + Weak Hours Filter (Skip 1-2 AM & 9-10 AM IST)")
     print(f"   TP1: {config.TP1_R}R (Close 40%) -> Lock SL at +{config.TRAILING_LOCK_R}R -> TP2: {config.TP2_R}R (Close 60%)")
     print(f"   Monitoring Assets: {', '.join(config.SYMBOLS)}")
-    print("=" * 80)
+    print("=" * 90)
 
     # Start Keepalive Dashboard in background thread
     dash_thread = threading.Thread(target=run_http_server, daemon=True)
@@ -168,17 +184,24 @@ def main():
     tg_thread = threading.Thread(target=run_telegram_poller, daemon=True)
     tg_thread.start()
 
+    month_cap = client.state.get("month_starting_capital", config.INITIAL_CAPITAL)
+    fixed_risk = month_cap * config.RISK_PER_TRADE_PCT
+
     telegram_notifier.send_alert(
-        f"🤖 *ELITE SNIPER BOT ONLINE!*\n"
+        f"🤖 *ELITE SNIPER BOT ONLINE (OPTION 2 ENGINE)!*\n"
         f"═══════════════════════\n"
         f"🏷️ Mode: *{'🟢 Paper Trading' if config.PAPER_TRADING else '🔥 Live Real Money'}*\n"
-        f"💼 Active Capital: *${client.state['active_capital']:.2f}*\n"
-        f"🎯 Strategy: *Wick Psychology (48% Rejection + 1.30x Vol)*\n"
+        f"⏱️ Timeframe: *3-Minute Entry + 1-Hour Trend Bias*\n"
+        f"💼 Month Starting Capital: *${month_cap:,.2f}*\n"
+        f"🎯 Risk Per Trade: *${fixed_risk:,.2f}* (6.25%)\n"
+        f"🛡️ Fee Shield Cap: *${config.MAX_POSITION_USD:,.0f} Max Position*\n"
+        f"⏳ Cooldown: *2-Hour Loss Cooldown Active*\n"
+        f"🚫 Session Filter: *Skipping 1-2 AM & 9-10 AM IST*\n"
         f"📊 Targets: *TP1: 1.9R (40% exit) | TP2: 4.0R (60% exit)*\n"
         f"🔒 Trailing Lock: *+0.50R Profit Guarantee after TP1*\n"
         f"🌐 Assets: `{', '.join(config.SYMBOLS)}`\n"
         f"═══════════════════════\n"
-        f"🚀 _Actively scanning 5M candles on Delta Exchange India!_"
+        f"🚀 _Actively scanning 3M candles on Delta Exchange India!_"
     )
 
     last_banner_time = 0
@@ -189,10 +212,12 @@ def main():
             if now - last_banner_time > 60:
                 dt_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 open_cnt = len(client.state["open_positions"])
-                print(f"[{dt_str}] Active Capital: ${client.state['active_capital']:.2f} | Banked: ${client.state.get('banked_profit', 0):.2f} | Open Trades: {open_cnt}/{config.MAX_CONCURRENT_TRADES}")
+                pending_cnt = len(strategy.pending_fvg)
+                print(f"[{dt_str}] Active: ${client.state['active_capital']:.2f} | Banked: ${client.state.get('banked_profit', 0):.2f} | Open: {open_cnt}/{config.MAX_CONCURRENT_TRADES} | Pending FVG: {pending_cnt}")
                 last_banner_time = now
 
             for symbol in config.SYMBOLS:
+                # Fetch latest 3M candles
                 candles = client.fetch_candles(symbol, resolution=config.CANDLE_RESOLUTION, limit=40)
                 if not candles:
                     continue
@@ -206,7 +231,7 @@ def main():
                 if symbol in client.state["open_positions"]:
                     strategy.manage_open_positions(symbol, curr_price, high_price, low_price)
 
-                # 2. If no trade open, search for new Elite Sniper setup
+                # 2. If no trade open on this symbol, scan for Option 2 setup
                 elif telegram_notifier.BOT_ACTIVE and len(client.state["open_positions"]) < config.MAX_CONCURRENT_TRADES:
                     setup = strategy.analyze_symbol(symbol, candles)
                     if setup:
@@ -221,7 +246,7 @@ def main():
                             vol_mult=setup["vol_mult"]
                         )
 
-            # Sleep between scans to avoid API rate-limits
+            # Sleep between scans
             time.sleep(10)
 
         except KeyboardInterrupt:
