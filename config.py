@@ -5,6 +5,21 @@ Exchange: Delta Exchange India (api.india.delta.exchange)
 ========================================================================================
 """
 import os
+import datetime
+
+# ========================================================================================
+# EXPLICIT INDIAN STANDARD TIME (IST) TIMEZONE LOCK (UTC+5:30)
+# Guarantees identical clock on Local Windows, Cloud VPS, Docker, and Render (which defaults to UTC)
+# ========================================================================================
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+def get_now_ist():
+    """Returns current datetime strictly locked to Indian Standard Time (IST, UTC+5:30)."""
+    return datetime.datetime.now(IST)
+
+def format_timestamp_ist(ts):
+    """Converts a unix timestamp (seconds) into formatted IST string."""
+    return datetime.datetime.fromtimestamp(ts, tz=IST).strftime('%Y-%m-%d %H:%M:%S')
 
 # TRADING MODE
 # True  = Simulated execution with realistic fills and slippage (100% safe)

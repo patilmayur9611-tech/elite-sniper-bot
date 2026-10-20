@@ -7,6 +7,7 @@ Delta Exchange India Live/Paper Automated Trading System
 - 2-Hour Loss Cooldown & Weak Hours Filter
 - $12,000 Fee Shield Cap
 - Monthly-Stepped Compounding Engine
+- Time strictly locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
 import time
@@ -37,7 +38,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "healthy", "timestamp": time.time()}).encode())
+            self.wfile.write(json.dumps({"status": "healthy", "timestamp": time.time(), "ist_time": config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')}).encode())
             return
 
         state = client.state
@@ -45,6 +46,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
         wins = len([t for t in history if t.get("total_pnl", 0) > 0])
         losses = len([t for t in history if t.get("total_pnl", 0) <= 0])
         win_rate = (wins / len(history) * 100) if history else 0.0
+        now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
 
         html = f"""
         <!DOCTYPE html>
@@ -60,6 +62,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                 .badge-green {{ background: #238636; color: white; }}
                 .badge-blue {{ background: #1f6feb; color: white; }}
                 .badge-purple {{ background: #8957e5; color: white; }}
+                .badge-orange {{ background: #d29922; color: black; }}
                 .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px; }}
                 .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; }}
                 .card-title {{ font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }}
@@ -78,7 +81,7 @@ class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
                     <span class="badge badge-green">STATUS: RUNNING</span>
                     <span class="badge badge-blue">MODE: {'PAPER TRADING' if config.PAPER_TRADING else 'LIVE REAL MONEY'}</span>
                     <span class="badge badge-purple">ENGINE: 3M Entry + 1H Bias</span>
-                    <span class="badge">EXCHANGE: Delta Exchange India</span>
+                    <span class="badge badge-orange">CLOCK: {now_ist_str} IST</span>
                 </div>
                 <div class="grid">
                     <div class="card">
@@ -162,10 +165,12 @@ def run_telegram_poller():
         time.sleep(2)
 
 def main():
+    now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
     print("=" * 90)
     print("🎯 ELITE PRICE ACTION & WICK PSYCHOLOGY SNIPER BOT (OPTION 2 MASTER ENGINE)")
     print("   Exchange: Delta Exchange India (api.india.delta.exchange)")
     print(f"   Mode: {'🟢 PAPER TRADING (Virtual Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING (Live Order Placement)'}")
+    print(f"   Clock: {now_ist_str} IST (Locked UTC+5:30)")
     print(f"   Timeframes: 3-Minute Entry Candles + 1-Hour Trend Bias Alignment")
     print(f"   Compounding Model: Monthly-Stepped (Month-Starting Capital: ${client.state.get('month_starting_capital', config.INITIAL_CAPITAL):.2f})")
     print(f"   Active Capital: ${client.state['active_capital']:.2f} | Banked Reserve: ${client.state.get('banked_profit', 0):.2f} (Cap: ${config.MAX_ACTIVE_CAPITAL:,.0f})")
@@ -191,6 +196,7 @@ def main():
         f"🤖 *ELITE SNIPER BOT ONLINE (OPTION 2 ENGINE)!*\n"
         f"═══════════════════════\n"
         f"🏷️ Mode: *{'🟢 Paper Trading' if config.PAPER_TRADING else '🔥 Live Real Money'}*\n"
+        f"🕒 Server Clock: `{now_ist_str} IST` *(Locked UTC+5:30)*\n"
         f"⏱️ Timeframe: *3-Minute Entry + 1-Hour Trend Bias*\n"
         f"💼 Month Starting Capital: *${month_cap:,.2f}*\n"
         f"🎯 Risk Per Trade: *${fixed_risk:,.2f}* (6.25%)\n"
@@ -210,10 +216,10 @@ def main():
         try:
             now = time.time()
             if now - last_banner_time > 60:
-                dt_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                dt_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
                 open_cnt = len(client.state["open_positions"])
                 pending_cnt = len(strategy.pending_fvg)
-                print(f"[{dt_str}] Active: ${client.state['active_capital']:.2f} | Banked: ${client.state.get('banked_profit', 0):.2f} | Open: {open_cnt}/{config.MAX_CONCURRENT_TRADES} | Pending FVG: {pending_cnt}")
+                print(f"[{dt_str} IST] Active: ${client.state['active_capital']:.2f} | Banked: ${client.state.get('banked_profit', 0):.2f} | Open: {open_cnt}/{config.MAX_CONCURRENT_TRADES} | Pending FVG: {pending_cnt}")
                 last_banner_time = now
 
             for symbol in config.SYMBOLS:

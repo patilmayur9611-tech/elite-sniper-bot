@@ -2,6 +2,7 @@
 ========================================================================================
 DELTA EXCHANGE INDIA CLIENT & MONTHLY-STEPPED COMPOUNDING PORTFOLIO MANAGER
 Option 2 Master Engine with $12,000 Fee Shield & 2-Hour Loss Cooldown
+Time strictly locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
 import urllib.request
@@ -24,7 +25,7 @@ class DeltaClient:
 
     def load_state(self):
         """Loads persistent portfolio balance and trade records."""
-        now_month = datetime.datetime.now().strftime('%Y-%m')
+        now_month = config.get_now_ist().strftime('%Y-%m')
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'r') as f:
@@ -62,7 +63,7 @@ class DeltaClient:
             print(f"[STATE SAVE ERROR] {e}")
 
     def fetch_candles(self, symbol, resolution=config.CANDLE_RESOLUTION, limit=100):
-        """Fetches latest OHLCV candles from Delta Exchange India."""
+        """Fetches latest OHLCV candles from Delta Exchange India with IST timestamps."""
         end_time = int(time.time())
         if resolution == "3m":
             res_secs = 180
@@ -88,7 +89,7 @@ class DeltaClient:
                 for c in candles:
                     formatted.append({
                         "time": c["time"],
-                        "datetime": datetime.datetime.fromtimestamp(c["time"]).strftime('%Y-%m-%d %H:%M'),
+                        "datetime": config.format_timestamp_ist(c["time"]),
                         "open": float(c["open"]),
                         "high": float(c["high"]),
                         "low": float(c["low"]),
@@ -131,15 +132,15 @@ class DeltaClient:
     def get_current_risk_allowance(self):
         """
         MONTHLY-STEPPED COMPOUNDING ENGINE:
-        - Active capital remains fixed for the entire calendar month.
-        - Only when month completes, month_starting_capital is updated for the new month.
+        - Active capital remains fixed for the entire calendar month (IST based).
+        - Only when month completes in IST, month_starting_capital is updated for the new month.
         - Risk per trade is strictly: month_starting_capital * 6.25% (capped at $1,250 on $20k cap).
         """
-        now_month = datetime.datetime.now().strftime('%Y-%m')
+        now_month = config.get_now_ist().strftime('%Y-%m')
         recorded_month = self.state.get("current_month", now_month)
 
         if now_month != recorded_month:
-            # Calendar month rollover!
+            # Calendar month rollover in IST!
             prev_cap = self.state.get("month_starting_capital", config.INITIAL_CAPITAL)
             curr_active = self.state.get("active_capital", config.INITIAL_CAPITAL)
             
@@ -159,15 +160,16 @@ class DeltaClient:
             msg = (
                 f"📅 *[MONTHLY CAPITAL ROLLOVER COMPLETED]*\n"
                 f"═══════════════════════\n"
-                f"📆 New Month: *{now_month}*\n"
+                f"📆 New Month (IST): *{now_month}*\n"
                 f"💼 Starting Active Capital: *${new_start_cap:,.2f}*\n"
                 f"🎯 Fixed Risk Per Trade: *${new_start_cap * config.RISK_PER_TRADE_PCT:,.2f}* (6.25%)\n"
                 f"🏦 Banked Reserve: *${self.state.get('banked_profit', 0):,.2f}*\n"
+                f"🕒 Clock: `{config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')} IST`\n"
                 f"═══════════════════════\n"
                 f"🚀 _Active capital is now locked for the next 30 days!_"
             )
             telegram_notifier.send_alert(msg)
-            print(f"📅 [MONTH ROLLOVER] New month {now_month}: Starting capital set to ${new_start_cap:,.2f}")
+            print(f"📅 [MONTH ROLLOVER IST] New month {now_month}: Starting capital set to ${new_start_cap:,.2f}")
 
         month_cap = min(self.state.get("month_starting_capital", config.INITIAL_CAPITAL), config.MAX_ACTIVE_CAPITAL)
         return month_cap * config.RISK_PER_TRADE_PCT
@@ -195,7 +197,7 @@ class DeltaClient:
         position_val = min(raw_position_val, config.MAX_POSITION_USD)
         margin_used = position_val / config.LEVERAGE
 
-        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade = {
             "symbol": symbol,
             "side": side,
@@ -289,7 +291,7 @@ class DeltaClient:
         duration_mins = int((time.time() - trade["entry_timestamp"]) / 60)
         trade["duration_mins"] = duration_mins
         trade["exit_price"] = exit_price
-        trade["exit_time"] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        trade["exit_time"] = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade["runner_pnl"] = round(net_runner_pnl, 2)
         trade["total_pnl"] = round(total_trade_pnl, 2)
         trade["exit_reason"] = reason

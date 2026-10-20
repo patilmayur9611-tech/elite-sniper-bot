@@ -6,7 +6,7 @@ Features:
 - 3M Candlestick Liquidity Sweep & Wick Absorption
 - Fair Value Gap (FVG) Pullback Limit Entry Retest (Waits up to 4 bars)
 - 2-Hour Loss Cooldown per Coin
-- Weak Hours Session Filter (Skip 1-2 AM & 9-10 AM IST)
+- Weak Hours Session Filter (Skip 1-2 AM & 9-10 AM IST) - Strictly Locked to IST (UTC+5:30)
 - Trailing Profit Lock at +0.50R Guaranteed Green
 ========================================================================================
 """
@@ -21,9 +21,8 @@ class StrategyEngine:
         self.pending_fvg = {}  # symbol -> dict of pending FVG limit setups
 
     def is_weak_hour(self):
-        """Checks if current time falls in low-volume chop hours (IST)."""
-        now_utc = datetime.datetime.utcnow()
-        now_ist = now_utc + datetime.timedelta(hours=5, minutes=30)
+        """Checks if current time falls in low-volume chop hours strictly in IST (+5:30)."""
+        now_ist = config.get_now_ist()
         return now_ist.hour in config.WEAK_HOURS_IST
 
     def get_1h_trend_bias(self, symbol):
@@ -49,7 +48,7 @@ class StrategyEngine:
         """
         Scans 3M candles for Option 2 Elite Sniper Setups:
         1. Checks 2-Hour Loss Cooldown
-        2. Checks Weak Hours Filter
+        2. Checks Weak Hours Filter (Strict IST)
         3. Monitors & fills pending FVG pullback limit orders
         4. Detects new 1H-aligned wick sweeps and creates pending FVG limit zones
         """
@@ -60,7 +59,7 @@ class StrategyEngine:
         if self.client.is_in_loss_cooldown(symbol):
             return None
 
-        # 2. Weak Hours Filter Defense
+        # 2. Weak Hours Filter Defense (Explicit IST)
         if self.is_weak_hour():
             return None
 

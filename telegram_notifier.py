@@ -136,7 +136,7 @@ def poll_telegram_commands(client):
                     positions = state.get("open_positions", {})
                     pos_txt = ""
                     if not positions:
-                        pos_txt = "ℹ️ _No active trades. Scanning 5M charts..._"
+                        pos_txt = "ℹ️ _No active trades. Scanning 3M charts with 1H Trend Bias..._"
                     else:
                         for s, p in positions.items():
                             tp1_tag = " [✅ TP1 Hit | 🔒 +0.5R Lock]" if p.get("tp1_hit") else " [Waiting TP1 1.9R]"
@@ -146,9 +146,11 @@ def poll_telegram_commands(client):
                                 f"  Status: {tp1_tag}\n"
                             )
 
+                    now_ist = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
                     reply = (
                         f"📊 *ELITE SNIPER BOT STATUS*\n"
                         f"═══════════════════════\n"
+                        f"🕒 Clock: `{now_ist} IST` *(Locked UTC+5:30)*\n"
                         f"🤖 State: *{'✅ RUNNING' if BOT_ACTIVE else '⏸️ PAUSED'}*\n"
                         f"🏷️ Mode: *{'🟢 Paper Simulation' if config.PAPER_TRADING else '🔥 Real Money (Delta India)'}*\n"
                         f"💼 Active Trading Capital: *${state['active_capital']:.2f}* (Max Cap: ${config.MAX_ACTIVE_CAPITAL:,.0f})\n"
