@@ -111,9 +111,11 @@ class StrategyEngine:
                     # Validate SL percentage range (0.18% to 0.50%)
                     if config.MIN_SL_PCT <= sl_pct <= config.MAX_SL_PCT:
                         if side == "LONG":
+                            rescue_tp = entry_price + (config.RESCUE_PROFIT_R * risk_dist)
                             tp1_price = entry_price + (config.TP1_R * risk_dist)
                             tp2_price = entry_price + (config.TP2_R * risk_dist)
                         else:
+                            rescue_tp = entry_price - (config.RESCUE_PROFIT_R * risk_dist)
                             tp1_price = entry_price - (config.TP1_R * risk_dist)
                             tp2_price = entry_price - (config.TP2_R * risk_dist)
 
@@ -123,6 +125,7 @@ class StrategyEngine:
                             "side": side,
                             "entry_price": entry_price,
                             "sl_price": sl_price,
+                            "rescue_tp": rescue_tp,
                             "tp1_price": tp1_price,
                             "tp2_price": tp2_price,
                             "wick_ratio": pending.get("wick_ratio", 0.50),

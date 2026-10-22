@@ -145,9 +145,20 @@ class DeltaClient:
         side = setup["side"]
         entry_price = setup["entry_price"]
         sl_price = setup["sl_price"]
-        rescue_tp = setup["rescue_tp"]
-        tp1_price = setup["tp1_price"]
-        tp2_price = setup["tp2_price"]
+        risk_dist = abs(entry_price - sl_price)
+
+        # Resilient target calculation (Guarantees zero KeyError)
+        rescue_tp = setup.get("rescue_tp")
+        if not rescue_tp:
+            rescue_tp = entry_price + (getattr(config, "RESCUE_PROFIT_R", 1.0) * risk_dist) if side == "LONG" else entry_price - (getattr(config, "RESCUE_PROFIT_R", 1.0) * risk_dist)
+
+        tp1_price = setup.get("tp1_price")
+        if not tp1_price:
+            tp1_price = entry_price + (getattr(config, "TP1_R", 1.9) * risk_dist) if side == "LONG" else entry_price - (getattr(config, "TP1_R", 1.9) * risk_dist)
+
+        tp2_price = setup.get("tp2_price")
+        if not tp2_price:
+            tp2_price = entry_price + (getattr(config, "TP2_R", 3.0) * risk_dist) if side == "LONG" else entry_price - (getattr(config, "TP2_R", 3.0) * risk_dist)
 
         if len(self.state["open_positions"]) >= config.MAX_CONCURRENT_TRADES:
             return None
