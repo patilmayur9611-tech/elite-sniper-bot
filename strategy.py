@@ -2,12 +2,13 @@
 ========================================================================================
 ELITE PRICE ACTION & WICK PSYCHOLOGY STRATEGY ENGINE (OPTION 2 MASTER ENGINE)
 Features:
-- 1H Trend Bias Alignment
+- 1H 20-EMA Macro Trend Filter (100% Counter-Trend Trade Elimination)
 - 3M Candlestick Liquidity Sweep & Wick Absorption
 - Fair Value Gap (FVG) Pullback Limit Entry Retest (Waits up to 4 bars)
+- +1.0R Breakeven Shield (Shifts SL to Entry + 0.10R to eliminate risk)
 - 2-Hour Loss Cooldown per Coin
-- Weak Hours Session Filter (Skip 1-2 AM & 9-10 AM IST) - Strictly Locked to IST (UTC+5:30)
-- Trailing Profit Lock at +0.50R Guaranteed Green
+- Weak Hours Session Filter (Skip 1-2 AM & 9-10 AM IST strictly locked to UTC+5:30)
+- Trailing Profit Lock at +0.50R Guaranteed Green after TP1
 ========================================================================================
 """
 import numpy as np
@@ -27,20 +28,31 @@ class StrategyEngine:
 
     def get_1h_trend_bias(self, symbol):
         """
-        Determines 1H Macro Trend Bias from Delta Exchange:
-        - BULLISH: 1H current candle close >= previous 1H candle open
-        - BEARISH: 1H current candle close <= previous 1H candle open
+        Determines 1H Macro Trend Bias from Delta Exchange using 1H 20-EMA:
+        - BULLISH: 1H candle close > 1H 20-EMA and close >= prev open (Shorts 100% BLOCKED)
+        - BEARISH: 1H candle close < 1H 20-EMA and close <= prev open (Longs 100% BLOCKED)
+        - NEUTRAL: Chop / conflict (ALL trades BLOCKED)
         """
-        candles_1h = self.client.fetch_candles(symbol, resolution=config.TREND_RESOLUTION, limit=5)
-        if len(candles_1h) < 2:
+        candles_1h = self.client.fetch_candles(symbol, resolution=config.TREND_RESOLUTION, limit=30)
+        if len(candles_1h) < 20:
             return "NEUTRAL"
+
+        closes = np.array([c["close"] for c in candles_1h])
+        # Calculate true 1H 20-EMA
+        alpha = 2.0 / (20.0 + 1.0)
+        ema = closes[0]
+        for p in closes[1:]:
+            ema = alpha * p + (1.0 - alpha) * ema
 
         c_curr = candles_1h[-1]
         c_prev = candles_1h[-2]
 
-        if c_curr["close"] >= c_prev["open"]:
+        curr_close = c_curr["close"]
+        prev_open = c_prev["open"]
+
+        if curr_close > ema and curr_close >= prev_open:
             return "BULLISH"
-        elif c_curr["close"] <= c_prev["open"]:
+        elif curr_close < ema and curr_close <= prev_open:
             return "BEARISH"
         return "NEUTRAL"
 
@@ -150,11 +162,11 @@ class StrategyEngine:
         if vol_mult < config.VOLUME_MULT_MIN:
             return None
 
-        # Check 1H Trend Bias
+        # Check 1H 20-EMA Macro Trend Bias (Strict: NEUTRAL is rejected!)
         bias = self.get_1h_trend_bias(symbol)
 
-        # 1. BULLISH ABSORPTION (Long Setup)
-        if bias in ["BULLISH", "NEUTRAL"]:
+        # 1. BULLISH ABSORPTION (Long Setup - Only allowed if 1H Trend is firmly BULLISH)
+        if bias == "BULLISH":
             lower_wick = min(c_open, c_close) - c_low
             lower_wick_ratio = lower_wick / c_range
 
@@ -175,10 +187,10 @@ class StrategyEngine:
                     "wick_ratio": lower_wick_ratio,
                     "vol_mult": vol_mult
                 }
-                print(f"👀 [FVG LONG ZONE DETECTED] {symbol} | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
+                print(f"👀 [FVG LONG ZONE DETECTED] {symbol} | Trend: 1H BULLISH (>20-EMA) | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
 
-        # 2. BEARISH ABSORPTION (Short Setup)
-        if bias in ["BEARISH", "NEUTRAL"]:
+        # 2. BEARISH ABSORPTION (Short Setup - Only allowed if 1H Trend is firmly BEARISH)
+        elif bias == "BEARISH":
             upper_wick = c_high - max(c_open, c_close)
             upper_wick_ratio = upper_wick / c_range
 
@@ -199,16 +211,18 @@ class StrategyEngine:
                     "wick_ratio": upper_wick_ratio,
                     "vol_mult": vol_mult
                 }
-                print(f"👀 [FVG SHORT ZONE DETECTED] {symbol} | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
+                print(f"👀 [FVG SHORT ZONE DETECTED] {symbol} | Trend: 1H BEARISH (<20-EMA) | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
 
         return None
 
     def manage_open_positions(self, symbol, current_price, candle_high, candle_low):
         """
         Manages ongoing positions:
+        - Detects Breakeven Shield (+1.0R) -> Shifts SL to Entry + 0.10R (100% Risk-Free!)
         - Detects Target 1 (1.9R) -> Locks 40% profit & shifts SL to +0.50R
         - Detects Target 2 (4.0R) -> Closes remaining 60% runner
         - Detects Trailing Stop hit -> Exits guaranteed in green (+0.50R)
+        - Detects Breakeven Exit -> Exits guaranteed in green (+0.10R, no cooldown)
         - Detects Initial Stop Loss hit -> Strict capital defense (-1.0R) & activates 2H Cooldown
         """
         if symbol not in self.client.state["open_positions"]:
@@ -220,45 +234,73 @@ class StrategyEngine:
         tp1 = trade["tp1_price"]
         tp2 = trade["tp2_price"]
         tp1_hit = trade["tp1_hit"]
+        entry = trade["entry_price"]
+        r_dist = abs(entry - trade["initial_sl"])
 
         if side == "LONG":
-            # Check TP1 hit
+            # 1. Check Breakeven Shield at +1.0R (before TP1)
+            if getattr(config, "USE_BREAKEVEN_SHIELD", True) and not tp1_hit and not trade.get("be_activated", False):
+                be_trigger_p = entry + (config.BREAKEVEN_TRIGGER_R * r_dist)
+                if candle_high >= be_trigger_p or current_price >= be_trigger_p:
+                    new_sl = entry + (config.BREAKEVEN_LOCK_R * r_dist)
+                    self.client.trigger_breakeven(symbol, new_sl)
+                    sl = new_sl
+
+            # 2. Check TP1 hit (1.9R)
             if not tp1_hit and (candle_high >= tp1 or current_price >= tp1):
                 self.client.trigger_tp1(symbol, tp1)
                 return
 
-            # Check TP2 hit (after TP1 is achieved)
+            # 3. Check TP2 hit (4.0R home run runner)
             if tp1_hit and (candle_high >= tp2 or current_price >= tp2):
                 self.client.close_full_trade(symbol, tp2, "TP2_HIT")
                 return
 
-            # Check Trailing SL (+0.50R) exit
+            # 4. Check Trailing SL (+0.50R) exit after TP1
             if tp1_hit and (candle_low <= sl or current_price <= sl):
                 self.client.close_full_trade(symbol, sl, "TRAILING_LOCK_HIT")
                 return
 
-            # Check initial SL exit (before TP1)
-            if not tp1_hit and (candle_low <= sl or current_price <= sl):
+            # 5. Check Breakeven SL (+0.10R) exit (Zero risk, no loss cooldown)
+            if not tp1_hit and trade.get("be_activated", False) and (candle_low <= sl or current_price <= sl):
+                self.client.close_full_trade(symbol, sl, "BREAKEVEN_EXIT")
+                return
+
+            # 6. Check Initial SL exit (-1.0R loss, triggers 2H cooldown)
+            if not tp1_hit and not trade.get("be_activated", False) and (candle_low <= sl or current_price <= sl):
                 self.client.close_full_trade(symbol, sl, "SL_HIT")
                 return
 
         elif side == "SHORT":
-            # Check TP1 hit
+            # 1. Check Breakeven Shield at +1.0R (before TP1)
+            if getattr(config, "USE_BREAKEVEN_SHIELD", True) and not tp1_hit and not trade.get("be_activated", False):
+                be_trigger_p = entry - (config.BREAKEVEN_TRIGGER_R * r_dist)
+                if candle_low <= be_trigger_p or current_price <= be_trigger_p:
+                    new_sl = entry - (config.BREAKEVEN_LOCK_R * r_dist)
+                    self.client.trigger_breakeven(symbol, new_sl)
+                    sl = new_sl
+
+            # 2. Check TP1 hit (1.9R)
             if not tp1_hit and (candle_low <= tp1 or current_price <= tp1):
                 self.client.trigger_tp1(symbol, tp1)
                 return
 
-            # Check TP2 hit (after TP1 is achieved)
+            # 3. Check TP2 hit (4.0R home run runner)
             if tp1_hit and (candle_low <= tp2 or current_price <= tp2):
                 self.client.close_full_trade(symbol, tp2, "TP2_HIT")
                 return
 
-            # Check Trailing SL (+0.50R) exit
+            # 4. Check Trailing SL (+0.50R) exit after TP1
             if tp1_hit and (candle_high >= sl or current_price >= sl):
                 self.client.close_full_trade(symbol, sl, "TRAILING_LOCK_HIT")
                 return
 
-            # Check initial SL exit (before TP1)
-            if not tp1_hit and (candle_high >= sl or current_price >= sl):
+            # 5. Check Breakeven SL (+0.10R) exit (Zero risk, no loss cooldown)
+            if not tp1_hit and trade.get("be_activated", False) and (candle_high >= sl or current_price >= sl):
+                self.client.close_full_trade(symbol, sl, "BREAKEVEN_EXIT")
+                return
+
+            # 6. Check Initial SL exit (-1.0R loss, triggers 2H cooldown)
+            if not tp1_hit and not trade.get("be_activated", False) and (candle_high >= sl or current_price >= sl):
                 self.client.close_full_trade(symbol, sl, "SL_HIT")
                 return

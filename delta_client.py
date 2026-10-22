@@ -1,7 +1,8 @@
 """
 ========================================================================================
-DELTA EXCHANGE INDIA CLIENT & MONTHLY-STEPPED COMPOUNDING PORTFOLIO MANAGER
-Option 2 Master Engine with $12,000 Fee Shield & 2-Hour Loss Cooldown
+DELTA EXCHANGE INDIA CLIENT & COMPOUNDING PORTFOLIO MANAGER (INR EDITION)
+Exchange: Delta Exchange India (api.india.delta.exchange)
+Currency: Indian Rupee (INR - ₹)
 Time strictly locked to Indian Standard Time (IST, UTC+5:30)
 ========================================================================================
 """
@@ -24,33 +25,33 @@ class DeltaClient:
         self.load_state()
 
     def load_state(self):
-        """Loads persistent portfolio balance and trade records."""
+        """Loads persistent portfolio balance and trade records in Indian Rupee (INR - ₹)."""
         now_month = config.get_now_ist().strftime('%Y-%m')
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'r') as f:
                     self.state = json.load(f)
-                    self.state.setdefault("initial_capital", config.INITIAL_CAPITAL)
-                    self.state.setdefault("active_capital", config.INITIAL_CAPITAL)
-                    self.state.setdefault("month_starting_capital", config.INITIAL_CAPITAL)
+                    self.state.setdefault("initial_capital_inr", config.INITIAL_CAPITAL_INR)
+                    self.state.setdefault("active_capital_inr", config.INITIAL_CAPITAL_INR)
+                    self.state.setdefault("month_starting_capital_inr", config.INITIAL_CAPITAL_INR)
                     self.state.setdefault("current_month", now_month)
-                    self.state.setdefault("banked_profit", 0.0)
-                    self.state.setdefault("total_net_pnl", 0.0)
+                    self.state.setdefault("banked_profit_inr", 0.0)
+                    self.state.setdefault("total_net_pnl_inr", 0.0)
                     self.state.setdefault("open_positions", {})
-                    self.state.setdefault("trade_history", [])
+                    self.state.setdefault("closed_trades", [])
                     return
             except Exception as e:
                 print(f"[STATE LOAD ERROR] {e}. Reinitializing default state.")
 
         self.state = {
-            "initial_capital": config.INITIAL_CAPITAL,
-            "active_capital": config.INITIAL_CAPITAL,
-            "month_starting_capital": config.INITIAL_CAPITAL,
+            "initial_capital_inr": config.INITIAL_CAPITAL_INR,
+            "active_capital_inr": config.INITIAL_CAPITAL_INR,
+            "month_starting_capital_inr": config.INITIAL_CAPITAL_INR,
             "current_month": now_month,
-            "banked_profit": 0.0,
-            "total_net_pnl": 0.0,
+            "banked_profit_inr": 0.0,
+            "total_net_pnl_inr": 0.0,
             "open_positions": {},
-            "trade_history": []
+            "closed_trades": []
         }
         self.save_state()
 
@@ -62,23 +63,18 @@ class DeltaClient:
         except Exception as e:
             print(f"[STATE SAVE ERROR] {e}")
 
-    def fetch_candles(self, symbol, resolution=config.CANDLE_RESOLUTION, limit=100):
-        """Fetches latest OHLCV candles from Delta Exchange India with IST timestamps."""
+    def fetch_candles(self, symbol, resolution="15m", limit=60):
+        """
+        Fetches historical candles from Delta Exchange India public API without geo-blocking.
+        """
         end_time = int(time.time())
-        if resolution == "3m":
-            res_secs = 180
-        elif resolution == "5m":
-            res_secs = 300
-        elif resolution == "15m":
-            res_secs = 900
-        elif resolution == "1h":
-            res_secs = 3600
-        elif resolution == "4h":
-            res_secs = 14400
-        else:
-            res_secs = 300
-
+        res_seconds_map = {
+            "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+            "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400
+        }
+        res_secs = res_seconds_map.get(resolution, 900)
         start_time = end_time - (res_secs * limit)
+
         url = f"{self.base_url}/v2/history/candles?resolution={resolution}&symbol={symbol}&start={start_time}&end={end_time}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
@@ -117,85 +113,61 @@ class DeltaClient:
         except Exception:
             return None
 
-    def is_in_loss_cooldown(self, symbol):
-        """Returns True if the coin is currently inside the 2-Hour post-loss cooldown."""
-        last_loss = self.last_loss_timestamps.get(symbol, 0)
-        elapsed = time.time() - last_loss
-        return elapsed < config.LOSS_COOLDOWN_SECONDS
-
-    def get_remaining_cooldown_mins(self, symbol):
-        """Returns remaining cooldown time in minutes."""
-        last_loss = self.last_loss_timestamps.get(symbol, 0)
-        remaining = config.LOSS_COOLDOWN_SECONDS - (time.time() - last_loss)
-        return max(0, int(remaining / 60))
-
-    def get_current_risk_allowance(self):
+    def get_current_risk_inr(self):
         """
-        MONTHLY-STEPPED COMPOUNDING ENGINE:
-        - Active capital remains fixed for the entire calendar month (IST based).
-        - Only when month completes in IST, month_starting_capital is updated for the new month.
-        - Risk per trade is strictly: month_starting_capital * 6.25% (capped at $1,250 on $20k cap).
+        Compounding Engine with Max Active Capital ceiling in INR:
+        - Risk per trade is strictly 2.0% of active INR capital.
+        - Surplus profits beyond MAX_ACTIVE_CAPITAL_INR are safely banked into the vault.
         """
         now_month = config.get_now_ist().strftime('%Y-%m')
         recorded_month = self.state.get("current_month", now_month)
 
         if now_month != recorded_month:
             # Calendar month rollover in IST!
-            prev_cap = self.state.get("month_starting_capital", config.INITIAL_CAPITAL)
-            curr_active = self.state.get("active_capital", config.INITIAL_CAPITAL)
-            
-            # Apply $20,000 hard active cap
-            if curr_active > config.MAX_ACTIVE_CAPITAL:
-                overflow = curr_active - config.MAX_ACTIVE_CAPITAL
-                self.state["banked_profit"] += overflow
-                self.state["active_capital"] = config.MAX_ACTIVE_CAPITAL
-                new_start_cap = config.MAX_ACTIVE_CAPITAL
-            else:
-                new_start_cap = max(curr_active, 100.0)
+            curr_active = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+            if curr_active > config.MAX_ACTIVE_CAPITAL_INR:
+                overflow = curr_active - config.MAX_ACTIVE_CAPITAL_INR
+                self.state["banked_profit_inr"] += overflow
+                self.state["active_capital_inr"] = config.MAX_ACTIVE_CAPITAL_INR
 
-            self.state["month_starting_capital"] = new_start_cap
+            self.state["month_starting_capital_inr"] = self.state["active_capital_inr"]
             self.state["current_month"] = now_month
             self.save_state()
 
-            msg = (
-                f"📅 *[MONTHLY CAPITAL ROLLOVER COMPLETED]*\n"
-                f"═══════════════════════\n"
-                f"📆 New Month (IST): *{now_month}*\n"
-                f"💼 Starting Active Capital: *${new_start_cap:,.2f}*\n"
-                f"🎯 Fixed Risk Per Trade: *${new_start_cap * config.RISK_PER_TRADE_PCT:,.2f}* (6.25%)\n"
-                f"🏦 Banked Reserve: *${self.state.get('banked_profit', 0):,.2f}*\n"
-                f"🕒 Clock: `{config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')} IST`\n"
-                f"═══════════════════════\n"
-                f"🚀 _Active capital is now locked for the next 30 days!_"
-            )
-            telegram_notifier.send_alert(msg)
-            print(f"📅 [MONTH ROLLOVER IST] New month {now_month}: Starting capital set to ${new_start_cap:,.2f}")
+        curr_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        return curr_cap * config.RISK_PER_TRADE_PCT
 
-        month_cap = min(self.state.get("month_starting_capital", config.INITIAL_CAPITAL), config.MAX_ACTIVE_CAPITAL)
-        return month_cap * config.RISK_PER_TRADE_PCT
+    def open_position(self, setup):
+        """
+        Opens a new trade position using 20x Leverage and Rescued Risk Management in INR.
+        """
+        symbol = setup["symbol"]
+        side = setup["side"]
+        entry_price = setup["entry_price"]
+        sl_price = setup["sl_price"]
+        rescue_tp = setup["rescue_tp"]
+        tp1_price = setup["tp1_price"]
+        tp2_price = setup["tp2_price"]
 
-    def open_trade(self, symbol, side, entry_price, sl_price, tp1_price, tp2_price, wick_ratio, vol_mult):
-        """Calculates sizing with $12,000 Fee Shield Cap and registers new position."""
         if len(self.state["open_positions"]) >= config.MAX_CONCURRENT_TRADES:
-            print(f"⚠️ Max concurrent trades ({config.MAX_CONCURRENT_TRADES}) reached. Skipping {symbol}.")
             return None
 
-        if self.is_in_loss_cooldown(symbol):
-            mins_left = self.get_remaining_cooldown_mins(symbol)
-            print(f"⏳ {symbol} in 2-Hour Loss Cooldown ({mins_left}m remaining). Skipping trade.")
-            return None
-
-        risk_dollars = self.get_current_risk_allowance()
+        risk_inr = self.get_current_risk_inr()
         sl_pct = abs(entry_price - sl_price) / entry_price
         if sl_pct <= 0:
             return None
 
-        # Position size in USD based on risk and SL distance
-        raw_position_val = risk_dollars / sl_pct
+        # Position value calculation in INR with dynamic 50% margin defense
+        raw_position_inr = risk_inr / sl_pct
+        curr_active_cap = self.state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
+        max_margin_allowed = curr_active_cap * getattr(config, "MAX_MARGIN_PER_TRADE_PCT", 0.50)
+        max_position_allowed = max_margin_allowed * config.LEVERAGE
+        position_inr = min(raw_position_inr, max_position_allowed, config.MAX_POSITION_INR)
+        margin_used_inr = position_inr / config.LEVERAGE
 
-        # FEE SHIELD CAP: Strictly cap position value to $12,000 USD
-        position_val = min(raw_position_val, config.MAX_POSITION_USD)
-        margin_used = position_val / config.LEVERAGE
+        # Equivalent USD sizes for Delta contract logic
+        position_usd = position_inr / config.USD_INR_RATE
+        entry_inr_est = entry_price * config.USD_INR_RATE
 
         now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade = {
@@ -204,161 +176,204 @@ class DeltaClient:
             "entry_time": now_str,
             "entry_timestamp": time.time(),
             "entry_price": entry_price,
+            "entry_inr_est": entry_inr_est,
             "sl_price": sl_price,
             "initial_sl": sl_price,
+            "rescue_tp": rescue_tp,
             "tp1_price": tp1_price,
             "tp2_price": tp2_price,
             "sl_pct": sl_pct * 100,
-            "risk_amount": risk_dollars,
-            "position_val": position_val,
-            "remaining_ratio": 1.0, # 100% open
-            "margin_used": margin_used,
+            "risk_inr": risk_inr,
+            "position_inr": position_inr,
+            "position_usd": position_usd,
+            "remaining_ratio": 1.0,  # 100% open initially
+            "margin_used_inr": margin_used_inr,
+            "rescue_hit": False,
             "tp1_hit": False,
-            "tp1_pnl": 0.0,
-            "trailing_lock_active": False,
-            "wick_ratio": wick_ratio,
-            "vol_mult": vol_mult
+            "realized_pnl_inr": 0.0,
+            "setup_type": setup.get("setup_type", "ICT_OTE")
         }
 
-        if config.PAPER_TRADING:
-            self.state["open_positions"][symbol] = trade
+        self.state["open_positions"][symbol] = trade
+        self.save_state()
+        telegram_notifier.notify_entry(trade)
+        print(f"🟢 [NEW TRADE OPENED] {symbol} {side} @ ${entry_price:.4f} (~₹{entry_inr_est:,.2f}) | Risk: {config.format_inr(risk_inr)} | 20x Margin: {config.format_inr(margin_used_inr)}")
+        return trade
+
+    def manage_positions(self):
+        """
+        Monitors active positions against live prices in INR:
+        1. Checks Level 1 Rescued TP (+1.0R / Asian Mid): Books 30% profit in INR & locks SL to Breakeven!
+        2. Checks Level 2 TP1 (Asian High/Low): Books 40% profit in INR & locks trailing SL!
+        3. Checks Level 3 TP2 Runner (3.0R): Books final 30% profit in INR!
+        4. Checks Stop Loss execution.
+        """
+        if not self.state["open_positions"]:
+            return
+
+        symbols_to_close = []
+
+        for symbol, trade in list(self.state["open_positions"].items()):
+            ticker = self.fetch_ticker(symbol)
+            if not ticker or ticker["last_price"] <= 0:
+                continue
+
+            current_price = ticker["last_price"]
+            side = trade["side"]
+            entry_price = trade["entry_price"]
+            sl_price = trade["sl_price"]
+            pos_inr = trade["position_inr"]
+
+            # ---------------------------------------------------------
+            # 1. RESCUED RULE (+1.0R): 40% Profit in INR & Elevated Breakeven Lock (+0.18% Fee Shield)
+            # ---------------------------------------------------------
+            if not trade["rescue_hit"]:
+                hit_rescue = (current_price >= trade["rescue_tp"]) if side == "LONG" else (current_price <= trade["rescue_tp"])
+                if hit_rescue:
+                    closed_val_inr = pos_inr * config.RESCUE_CLOSE_RATIO
+                    r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
+                    pnl_rescue_inr = closed_val_inr * r_dist_pct
+
+                    trade["remaining_ratio"] -= config.RESCUE_CLOSE_RATIO
+                    trade["realized_pnl_inr"] += pnl_rescue_inr
+                    trade["rescue_hit"] = True
+
+                    # Elevated Breakeven (+0.18% Fee Shield): Covers 100% of Delta Exchange entry/exit fees + GST!
+                    fee_shield_pct = getattr(config, "ELEVATED_BREAKEVEN_PCT", 0.0018)
+                    elevated_be = entry_price * (1.0 + fee_shield_pct) if side == "LONG" else entry_price * (1.0 - fee_shield_pct)
+                    trade["sl_price"] = elevated_be
+
+                    self._apply_realized_pnl_inr(pnl_rescue_inr)
+                    self.save_state()
+                    telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
+                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} booked 40% (+{config.format_inr(pnl_rescue_inr)}) & SL moved to ELEVATED BREAKEVEN (${elevated_be:.4f})!")
+
+            # ---------------------------------------------------------
+            # 2. TARGET 1: 40% Profit in INR & Trailing SL Locked at +1.0R
+            # ---------------------------------------------------------
+            if not trade["tp1_hit"] and trade["rescue_hit"]:
+                hit_tp1 = (current_price >= trade["tp1_price"]) if side == "LONG" else (current_price <= trade["tp1_price"])
+                if hit_tp1:
+                    closed_val_inr = pos_inr * config.TP1_CLOSE_RATIO
+                    r_dist_pct = abs(trade["tp1_price"] - entry_price) / entry_price
+                    pnl_tp1_inr = closed_val_inr * r_dist_pct
+
+                    trade["remaining_ratio"] -= config.TP1_CLOSE_RATIO
+                    trade["realized_pnl_inr"] += pnl_tp1_inr
+                    trade["tp1_hit"] = True
+
+                    # Lock SL to +1.0R in guaranteed profit for remaining 20% runner
+                    r_dist = abs(entry_price - trade["initial_sl"])
+                    trade["sl_price"] = entry_price + (1.0 * r_dist) if side == "LONG" else entry_price - (1.0 * r_dist)
+
+                    self._apply_realized_pnl_inr(pnl_tp1_inr)
+                    self.save_state()
+                    telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
+                    print(f"💰 [TP1 HIT] {symbol} booked 40% (+{config.format_inr(pnl_tp1_inr)}) & trailing SL locked at +1.0R!")
+
+            # ---------------------------------------------------------
+            # 3. TARGET 2 RUNNER (3.0R Home Run): Final 20% Profit in INR
+            # ---------------------------------------------------------
+            hit_tp2 = (current_price >= trade["tp2_price"]) if side == "LONG" else (current_price <= trade["tp2_price"])
+            if hit_tp2 and trade["tp1_hit"]:
+                closed_val_inr = pos_inr * trade["remaining_ratio"]
+                r_dist_pct = abs(trade["tp2_price"] - entry_price) / entry_price
+                pnl_tp2_inr = closed_val_inr * r_dist_pct
+
+                total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_tp2_inr
+                self._apply_realized_pnl_inr(pnl_tp2_inr)
+
+                telegram_notifier.notify_tp2_hit(trade, total_trade_pnl_inr)
+                symbols_to_close.append((symbol, "TARGET_2_FULL_WIN", total_trade_pnl_inr, current_price))
+                continue
+
+            # ---------------------------------------------------------
+            # 4. STOP LOSS CHECK (Elevated Breakeven, Trailing SL, or Initial SL)
+            # ---------------------------------------------------------
+            hit_sl = (current_price <= sl_price) if side == "LONG" else (current_price >= sl_price)
+            if hit_sl:
+                remaining_val_inr = pos_inr * trade["remaining_ratio"]
+                
+                # Check direction of exit relative to entry
+                if side == "LONG":
+                    gain_pct = (sl_price - entry_price) / entry_price
+                else:
+                    gain_pct = (entry_price - sl_price) / entry_price
+
+                pnl_remaining_inr = remaining_val_inr * gain_pct
+
+                if trade["tp1_hit"]:
+                    reason = "TRAILING_LOCK_EXIT"
+                elif trade["rescue_hit"]:
+                    reason = "ELEVATED_BREAKEVEN_EXIT"
+                else:
+                    reason = "STOP_LOSS_EXIT"
+
+                total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_remaining_inr
+                self._apply_realized_pnl_inr(pnl_remaining_inr)
+
+                telegram_notifier.notify_sl_hit(trade, total_trade_pnl_inr, reason)
+                symbols_to_close.append((symbol, reason, total_trade_pnl_inr, current_price))
+
+        for symbol, reason, final_pnl_inr, exit_px in symbols_to_close:
+            self._close_position_record(symbol, reason, final_pnl_inr, exit_px)
+
+    def _apply_realized_pnl_inr(self, pnl_inr):
+        """Applies realized PnL in INR and manages the MAX_ACTIVE_CAPITAL_INR cap."""
+        self.state["active_capital_inr"] += pnl_inr
+        self.state["total_net_pnl_inr"] += pnl_inr
+
+        # Surplus profit beyond MAX_ACTIVE_CAPITAL_INR gets banked into safe vault
+        if self.state["active_capital_inr"] > config.MAX_ACTIVE_CAPITAL_INR:
+            overflow = self.state["active_capital_inr"] - config.MAX_ACTIVE_CAPITAL_INR
+            self.state["banked_profit_inr"] += overflow
+            self.state["active_capital_inr"] = config.MAX_ACTIVE_CAPITAL_INR
+
+    def _close_position_record(self, symbol, reason, final_pnl_inr, exit_px):
+        """Archives closed trade and removes from open positions."""
+        if symbol in self.state["open_positions"]:
+            trade = self.state["open_positions"].pop(symbol)
+            trade["exit_time"] = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
+            trade["exit_price"] = exit_px
+            trade["final_pnl_inr"] = final_pnl_inr
+            trade["close_reason"] = reason
+
+            self.state["closed_trades"].append(trade)
+            if final_pnl_inr < 0:
+                self.record_loss_cooldown(symbol)
             self.save_state()
-            telegram_notifier.notify_entry(trade)
-            print(f"🟢 [NEW TRADE OPENED] {symbol} {side} @ ${entry_price:.4f} | Risk: ${risk_dollars:.2f} | Pos: ${position_val:,.0f} | 20x Margin: ${margin_used:.2f}")
-            return trade
-        else:
-            return self.execute_live_order(trade)
+            print(f"🏁 [POSITION CLOSED] {symbol} | Reason: {reason} | Final PnL: {config.format_inr(final_pnl_inr)}")
 
-    def trigger_tp1(self, symbol, current_price):
-        """
-        Executes TP1 (1.9R):
-        1. Books 40% position profit.
-        2. Shifts remaining 60% runner's Stop-Loss to +0.50R in PROFIT.
-        """
-        if symbol not in self.state["open_positions"]:
-            return
+    def is_in_loss_cooldown(self, symbol):
+        """Checks if symbol suffered a loss within the last 2 hours (7200 seconds)."""
+        cooldowns = self.state.get("loss_cooldowns", {})
+        last_loss = cooldowns.get(symbol, 0)
+        return (time.time() - last_loss) < 7200
 
-        trade = self.state["open_positions"][symbol]
-        if trade["tp1_hit"]:
-            return
-
-        # 40% position value
-        pos_40 = trade["position_val"] * config.TP1_CLOSE_RATIO
-        r_dist = abs(trade["entry_price"] - trade["initial_sl"])
-
-        pnl_40 = (pos_40 * config.TP1_R * (r_dist / trade["entry_price"])) - (pos_40 * 0.001)
-
-        # Update compounding balance with TP1 profit
-        self._apply_realized_pnl(pnl_40)
-
-        # Calculate new trailing stop at +0.50R in PROFIT
-        if trade["side"] == "LONG":
-            new_sl = trade["entry_price"] + (config.TRAILING_LOCK_R * r_dist)
-        else:
-            new_sl = trade["entry_price"] - (config.TRAILING_LOCK_R * r_dist)
-
-        trade["tp1_hit"] = True
-        trade["tp1_pnl"] = pnl_40
-        trade["remaining_ratio"] = 1.0 - config.TP1_CLOSE_RATIO # 60% remaining
-        trade["sl_price"] = new_sl
-        trade["trailing_lock_active"] = True
-
-        self.save_state()
-        telegram_notifier.notify_tp1_hit(trade, pnl_40, new_sl)
-        print(f"💰 [TP1 HIT] {symbol} | Banked 40%: +${pnl_40:.2f} | SL shifted to +0.50R: ${new_sl:.4f}")
-
-    def close_full_trade(self, symbol, exit_price, reason):
-        """Closes remaining position (TP2, Trailing SL hit, or initial SL hit)."""
-        if symbol not in self.state["open_positions"]:
-            return
-
-        trade = self.state["open_positions"][symbol]
-        remaining_ratio = trade["remaining_ratio"]
-        runner_pos_val = trade["position_val"] * remaining_ratio
-
-        if trade["side"] == "LONG":
-            pct_change = (exit_price - trade["entry_price"]) / trade["entry_price"]
-        else:
-            pct_change = (trade["entry_price"] - exit_price) / trade["entry_price"]
-
-        gross_runner_pnl = runner_pos_val * pct_change
-        fee = runner_pos_val * 0.001
-        net_runner_pnl = gross_runner_pnl - fee
-
-        self._apply_realized_pnl(net_runner_pnl)
-        total_trade_pnl = trade.get("tp1_pnl", 0.0) + net_runner_pnl
-
-        duration_mins = int((time.time() - trade["entry_timestamp"]) / 60)
-        trade["duration_mins"] = duration_mins
-        trade["exit_price"] = exit_price
-        trade["exit_time"] = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
-        trade["runner_pnl"] = round(net_runner_pnl, 2)
-        trade["total_pnl"] = round(total_trade_pnl, 2)
-        trade["exit_reason"] = reason
-
-        self.state["trade_history"].append(trade)
-        del self.state["open_positions"][symbol]
-
-        # Trigger 2-Hour Loss Cooldown if Stop-Loss hit
-        if reason == "SL_HIT":
-            self.last_loss_timestamps[symbol] = time.time()
-            print(f"⏳ [2-HOUR COOLDOWN ACTIVATED] {symbol} will not trade for 2 hours to avoid chop.")
-
+    def record_loss_cooldown(self, symbol):
+        """Records a 2-hour loss cooldown timestamp."""
+        if "loss_cooldowns" not in self.state:
+            self.state["loss_cooldowns"] = {}
+        self.state["loss_cooldowns"][symbol] = time.time()
         self.save_state()
 
-        if reason == "TP2_HIT":
-            telegram_notifier.notify_tp2_hit(trade, net_runner_pnl, total_trade_pnl)
-        elif reason == "TRAILING_LOCK_HIT":
-            telegram_notifier.notify_trailing_sl_exit(trade, net_runner_pnl, total_trade_pnl)
-        else:
-            telegram_notifier.notify_sl_hit(trade, abs(total_trade_pnl))
+    def trigger_breakeven(self, symbol, new_sl):
+        """Shifts stop loss to breakeven."""
+        if symbol in self.state["open_positions"]:
+            self.state["open_positions"][symbol]["sl_price"] = new_sl
+            self.state["open_positions"][symbol]["be_activated"] = True
+            self.save_state()
 
-        print(f"🏁 [TRADE CLOSED] {symbol} | Reason: {reason} | Runner PnL: ${net_runner_pnl:+.2f} | Total: ${total_trade_pnl:+.2f}")
+    def trigger_tp1(self, symbol, new_sl):
+        """Marks TP1 hit and trails stop loss."""
+        if symbol in self.state["open_positions"]:
+            self.state["open_positions"][symbol]["tp1_hit"] = True
+            self.state["open_positions"][symbol]["sl_price"] = new_sl
+            self.save_state()
 
-    def _apply_realized_pnl(self, pnl):
-        """Updates active capital with realized PnL."""
-        self.state["total_net_pnl"] += pnl
-        self.state["active_capital"] += pnl
-        self.save_state()
-
-    def execute_live_order(self, trade):
-        """Sends authenticated orders to Delta Exchange India."""
-        timestamp = str(int(time.time()))
-        method = "POST"
-        path = "/v2/orders"
-        contracts = max(1, int(trade["position_val"] / trade["entry_price"]))
-        body = json.dumps({
-            "product_symbol": trade["symbol"],
-            "size": contracts,
-            "side": "buy" if trade["side"] == "LONG" else "sell",
-            "order_type": "market_order"
-        })
-
-        signature_data = method + timestamp + path + body
-        signature = hmac.new(
-            config.DELTA_API_SECRET.encode('utf-8'),
-            signature_data.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-
-        headers = {
-            "Content-Type": "application/json",
-            "api-key": config.DELTA_API_KEY,
-            "timestamp": timestamp,
-            "signature": signature,
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        url = f"{self.base_url}{path}"
-        req = urllib.request.Request(url, data=body.encode('utf-8'), headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                res = json.loads(r.read().decode())
-                print(f"🔥 [LIVE ORDER PLACED] {trade['symbol']} {trade['side']} ({contracts} contracts): {res}")
-                self.state["open_positions"][trade["symbol"]] = trade
-                self.save_state()
-                telegram_notifier.notify_entry(trade)
-                return trade
-        except Exception as e:
-            print(f"❌ [LIVE EXECUTION FAILED] {trade['symbol']}: {e}")
-            return None
+    def close_full_trade(self, symbol, reason, pnl):
+        """Closes entire remaining position."""
+        if symbol in self.state["open_positions"]:
+            ticker = self.fetch_ticker(symbol)
+            exit_px = ticker.get("last_price", 0) if ticker else 0
+            self._close_position_record(symbol, reason, pnl, exit_px)
