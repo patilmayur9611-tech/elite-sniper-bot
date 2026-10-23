@@ -125,10 +125,13 @@ TP1_R = 1.9
 TP1_CLOSE_RATIO = 0.30
 TP1_LOCK_SL_R = 1.2              # Lock SL at +1.2R guaranteed profit floor
 
-# Level 3: Open 40% Runner -> No fixed cap, dynamically trails peak - 0.50R
+# Level 3: Open 40% Runner -> No fixed cap, dynamically trails peak with ATR breathing room
 TP2_R = 3.0                      # Reference target
 RUNNER_RATIO = 0.40
-TRAIL_DISTANCE_R = 0.50          # Distance behind peak price to trail 40% runner
+TRAIL_DISTANCE_R = 0.50          # Base distance behind peak price to trail 40% runner
+TRAIL_ATR_MULT = 1.25            # Multiplier for 3M ATR buffer
+MIN_TRAIL_DISTANCE_R = 0.50      # Minimum trailing distance floor
+MAX_TRAIL_DISTANCE_R = 0.85      # Maximum trailing distance ceiling
 
 # ========================================================================================
 # 10. CLOUD KEEPALIVE & HEALTHCHECK SERVER (RENDER DEPLOYMENT)

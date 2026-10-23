@@ -180,6 +180,31 @@ class DeltaClient:
         position_usd = position_inr / config.USD_INR_RATE
         entry_inr_est = entry_price * config.USD_INR_RATE
 
+        # Integer Contract Lot Sizing & Allocation (Delta Exchange Live Order Shield)
+        est_contract_val = entry_price * 0.001 if "BTC" in symbol else entry_price * 0.1 if ("SOL" in symbol or "BNB" in symbol) else 1.0
+        total_contracts = max(1, int(round(position_usd / est_contract_val)))
+
+        if total_contracts == 1:
+            tp1_contracts = 1
+            tp2_contracts = 0
+            runner_contracts = 0
+        elif total_contracts == 2:
+            tp1_contracts = 1
+            tp2_contracts = 0
+            runner_contracts = 1
+        elif total_contracts == 3:
+            tp1_contracts = 1
+            tp2_contracts = 1
+            runner_contracts = 1
+        else:
+            tp1_contracts = max(1, int(round(total_contracts * getattr(config, "RESCUE_CLOSE_RATIO", 0.30))))
+            tp2_contracts = max(1, int(round(total_contracts * getattr(config, "TP1_CLOSE_RATIO", 0.30))))
+            runner_contracts = total_contracts - tp1_contracts - tp2_contracts
+            if runner_contracts <= 0:
+                runner_contracts = 1
+                if tp2_contracts > 1: tp2_contracts -= 1
+                elif tp1_contracts > 1: tp1_contracts -= 1
+
         now_str = config.get_now_ist().strftime('%Y-%m-%d %H:%M:%S')
         trade = {
             "symbol": symbol,
@@ -197,12 +222,18 @@ class DeltaClient:
             "risk_inr": risk_inr,
             "position_inr": position_inr,
             "position_usd": position_usd,
+            "total_contracts": total_contracts,
+            "tp1_contracts": tp1_contracts,
+            "tp2_contracts": tp2_contracts,
+            "runner_contracts": runner_contracts,
+            "remaining_contracts": total_contracts,
             "remaining_ratio": 1.0,  # 100% open initially
             "margin_used_inr": margin_used_inr,
             "rescue_hit": False,
             "tp1_hit": False,
             "peak_price": entry_price,
             "peak_r": 0.0,
+            "atr_val": setup.get("atr_val", abs(entry_price - sl_price) * 0.40),
             "realized_pnl_inr": 0.0,
             "setup_type": setup.get("setup_type", "ICT_OTE")
         }
@@ -250,12 +281,15 @@ class DeltaClient:
             if not trade["rescue_hit"]:
                 hit_rescue = (current_price >= trade["rescue_tp"]) if side == "LONG" else (current_price <= trade["rescue_tp"])
                 if hit_rescue:
-                    close_ratio = getattr(config, "RESCUE_CLOSE_RATIO", 0.30)
+                    close_qty = trade.get("tp1_contracts", 0)
+                    total_qty = trade.get("total_contracts", 1)
+                    close_ratio = (close_qty / total_qty) if (total_qty > 0 and close_qty > 0) else getattr(config, "RESCUE_CLOSE_RATIO", 0.30)
                     closed_val_inr = pos_inr * close_ratio
                     r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
                     pnl_rescue_inr = closed_val_inr * r_dist_pct
 
                     trade["remaining_ratio"] -= close_ratio
+                    trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_qty) - close_qty)
                     trade["realized_pnl_inr"] += pnl_rescue_inr
                     trade["rescue_hit"] = True
 
@@ -267,7 +301,8 @@ class DeltaClient:
                     self._apply_realized_pnl_inr(pnl_rescue_inr)
                     self.save_state()
                     telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
-                    print(f"🛡️ [LEVEL 1 HIT] {symbol} booked 30% (+{config.format_inr(pnl_rescue_inr)}) & SL moved to ELEVATED BREAKEVEN (${elevated_be:.4f})!")
+                    qty_desc = f"{close_qty} contracts" if close_qty > 0 else f"{close_ratio*100:.0f}%"
+                    print(f"🛡️ [LEVEL 1 HIT] {symbol} booked {qty_desc} (+{config.format_inr(pnl_rescue_inr)}) & SL moved to ELEVATED BREAKEVEN (${elevated_be:.4f})!")
 
             # ---------------------------------------------------------
             # 2. TARGET 1 (+1.9R): 30% Profit in INR & RATCHET SL Locked at +1.2R Guaranteed Floor!
@@ -275,12 +310,15 @@ class DeltaClient:
             if not trade["tp1_hit"] and trade["rescue_hit"]:
                 hit_tp1 = (current_price >= trade["tp1_price"]) if side == "LONG" else (current_price <= trade["tp1_price"])
                 if hit_tp1:
-                    close_ratio = getattr(config, "TP1_CLOSE_RATIO", 0.30)
+                    close_qty = trade.get("tp2_contracts", 0)
+                    total_qty = trade.get("total_contracts", 1)
+                    close_ratio = (close_qty / total_qty) if (total_qty > 0 and close_qty > 0) else getattr(config, "TP1_CLOSE_RATIO", 0.30)
                     closed_val_inr = pos_inr * close_ratio
                     r_dist_pct = abs(trade["tp1_price"] - entry_price) / entry_price
                     pnl_tp1_inr = closed_val_inr * r_dist_pct
 
                     trade["remaining_ratio"] -= close_ratio
+                    trade["remaining_contracts"] = max(0, trade.get("remaining_contracts", total_qty) - close_qty)
                     trade["realized_pnl_inr"] += pnl_tp1_inr
                     trade["tp1_hit"] = True
 
@@ -292,15 +330,22 @@ class DeltaClient:
                     self._apply_realized_pnl_inr(pnl_tp1_inr)
                     self.save_state()
                     telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
-                    print(f"💰 [TARGET 1 HIT] {symbol} booked 30% (+{config.format_inr(pnl_tp1_inr)}) & SL RATCHET LOCKED AT +{lock_r}R GUARANTEED PROFIT (${ratchet_sl:.4f})!")
+                    qty_desc = f"{close_qty} contracts" if close_qty > 0 else f"{close_ratio*100:.0f}%"
+                    print(f"💰 [TARGET 1 HIT] {symbol} booked {qty_desc} (+{config.format_inr(pnl_tp1_inr)}) & SL RATCHET LOCKED AT +{lock_r}R GUARANTEED PROFIT (${ratchet_sl:.4f})!")
 
             # ---------------------------------------------------------
-            # 3. OPEN 40% RUNNER DYNAMIC TRAILING (Peak - 0.50R)
+            # 3. OPEN 40% RUNNER ATR-AWARE DYNAMIC TRAILING
             # ---------------------------------------------------------
             if trade["tp1_hit"]:
-                trail_dist = getattr(config, "TRAIL_DISTANCE_R", 0.50)
+                atr_val = trade.get("atr_val", r_dist * 0.40)
+                atr_mult = getattr(config, "TRAIL_ATR_MULT", 1.25)
+                min_dist = getattr(config, "MIN_TRAIL_DISTANCE_R", 0.50)
+                max_dist = getattr(config, "MAX_TRAIL_DISTANCE_R", 0.85)
+
+                atr_dist_r = (atr_mult * atr_val / r_dist) if r_dist > 0 else min_dist
+                trail_buffer = max(min_dist, min(max_dist, atr_dist_r))
                 lock_floor_r = getattr(config, "TP1_LOCK_SL_R", 1.2)
-                trail_r = trade.get("peak_r", 0.0) - trail_dist
+                trail_r = trade.get("peak_r", 0.0) - trail_buffer
 
                 if trail_r > lock_floor_r:
                     new_trail_sl = entry_price + (trail_r * r_dist) if side == "LONG" else entry_price - (trail_r * r_dist)
@@ -309,7 +354,7 @@ class DeltaClient:
                         old_sl = trade["sl_price"]
                         trade["sl_price"] = new_trail_sl
                         self.save_state()
-                        print(f"📈 [DYNAMIC TRAIL ADVANCED] {symbol} 40% runner SL advanced from ${old_sl:.4f} to ${new_trail_sl:.4f} (+{trail_r:.2f}R from peak {trade['peak_r']:.2f}R)!")
+                        print(f"📈 [ATR DYNAMIC TRAIL] {symbol} runner SL advanced from ${old_sl:.4f} to ${new_trail_sl:.4f} (+{trail_r:.2f}R from peak {trade['peak_r']:.2f}R, buffer {trail_buffer:.2f}R)!")
 
             # ---------------------------------------------------------
             # 4. STOP LOSS CHECK (Elevated Breakeven, Ratchet Trailing SL, or Initial SL)

@@ -40,6 +40,8 @@ def send_alert(message):
 def notify_entry(trade):
     """Sends entry alert with full Option 2 parameters formatted in INR (₹)."""
     side_icon = "🟢 *LONG*" if trade['side'] == 'LONG' else "🔴 *SHORT*"
+    contracts_str = f"📦 Contracts: *{trade.get('total_contracts', 1)} total* (TP1: {trade.get('tp1_contracts', 0)} - TP2: {trade.get('tp2_contracts', 0)} - Runner: {trade.get('runner_contracts', 1)})\n" if 'total_contracts' in trade else ""
+    setup_name = str(trade.get('setup_type', 'Option 2 Elite Sniper')).replace('_', ' ')
     msg = (
         f"🎯 *[NEW ELITE SNIPER ENTRY]* {side_icon}\n"
         f"═══════════════════════\n"
@@ -48,12 +50,13 @@ def notify_entry(trade):
         f"🛡️ Initial Stop-Loss: *${trade['sl_price']:.4f}* (~₹{trade['sl_price']*config.USD_INR_RATE:,.2f})\n"
         f"💰 Risk Amount ({config.RISK_PER_TRADE_PCT*100:.1f}%): *{config.format_inr(trade['risk_inr'])}*\n"
         f"💼 20x Margin Locked: *{config.format_inr(trade['margin_used_inr'])}*\n"
+        f"{contracts_str}"
         f"═══════════════════════\n"
         f"🛡️ Level 1 (+1.0R): *${trade['rescue_tp']:.4f}* (30% Book + Fee BE)\n"
         f"🎯 Target 1 (+1.9R): *${trade['tp1_price']:.4f}* (30% Book + SL Lock @ +1.2R)\n"
-        f"🚀 Open Runner (40%): *Dynamic Peak Trail (-0.50R)*\n"
+        f"🚀 Open Runner (40%): *ATR Dynamic Peak Trail*\n"
         f"🕒 Time: `{trade['entry_time']}` IST\n"
-        f"💡 _Setup: {trade.get('setup_type', 'Option 2 Elite Sniper')}_"
+        f"💡 _Setup: {setup_name}_\n"
     )
     send_alert(msg)
 

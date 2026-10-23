@@ -129,7 +129,8 @@ class StrategyEngine:
                             "tp1_price": tp1_price,
                             "tp2_price": tp2_price,
                             "wick_ratio": pending.get("wick_ratio", 0.50),
-                            "vol_mult": pending.get("vol_mult", 1.50)
+                            "vol_mult": pending.get("vol_mult", 1.50),
+                            "atr_val": pending.get("atr_val", risk_dist * 0.40)
                         }
 
         # 4. Check for NEW Wick Absorption Setup on 3M Candles
@@ -165,6 +166,15 @@ class StrategyEngine:
         if vol_mult < config.VOLUME_MULT_MIN:
             return None
 
+        # Calculate 3M 14-period ATR for dynamic volatility trailing
+        trs = []
+        for k in range(max(1, len(candles)-14), len(candles)):
+            ck = candles[k]
+            ck_prev = candles[k-1]
+            tr = max(ck["high"] - ck["low"], abs(ck["high"] - ck_prev["close"]), abs(ck["low"] - ck_prev["close"]))
+            trs.append(tr)
+        atr_val = float(np.mean(trs)) if trs else float(c_range)
+
         # Check 1H 20-EMA Macro Trend Bias (Strict: NEUTRAL is rejected!)
         bias = self.get_1h_trend_bias(symbol)
 
@@ -188,7 +198,8 @@ class StrategyEngine:
                     "sl": sl_price,
                     "bars_waited": 0,
                     "wick_ratio": lower_wick_ratio,
-                    "vol_mult": vol_mult
+                    "vol_mult": vol_mult,
+                    "atr_val": atr_val
                 }
                 print(f"👀 [FVG LONG ZONE DETECTED] {symbol} | Trend: 1H BULLISH (>20-EMA) | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
 
@@ -212,7 +223,8 @@ class StrategyEngine:
                     "sl": sl_price,
                     "bars_waited": 0,
                     "wick_ratio": upper_wick_ratio,
-                    "vol_mult": vol_mult
+                    "vol_mult": vol_mult,
+                    "atr_val": atr_val
                 }
                 print(f"👀 [FVG SHORT ZONE DETECTED] {symbol} | Trend: 1H BEARISH (<20-EMA) | Waiting pullback into ${fvg_low:.4f} - ${fvg_high:.4f} | SL: ${sl_price:.4f}")
 
