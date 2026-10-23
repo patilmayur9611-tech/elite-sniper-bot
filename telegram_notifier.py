@@ -49,9 +49,9 @@ def notify_entry(trade):
         f"💰 Risk Amount ({config.RISK_PER_TRADE_PCT*100:.1f}%): *{config.format_inr(trade['risk_inr'])}*\n"
         f"💼 20x Margin Locked: *{config.format_inr(trade['margin_used_inr'])}*\n"
         f"═══════════════════════\n"
-        f"🛡️ Level 1 (+1R): *${trade['rescue_tp']:.4f}* (~₹{trade['rescue_tp']*config.USD_INR_RATE:,.2f}) (40% Book + Fee BE)\n"
-        f"🎯 Target 1 (+1.9R): *${trade['tp1_price']:.4f}* (~₹{trade['tp1_price']*config.USD_INR_RATE:,.2f}) (40% Profit)\n"
-        f"🚀 Target 2 Runner (+3R): *${trade['tp2_price']:.4f}* (~₹{trade['tp2_price']*config.USD_INR_RATE:,.2f}) (20% Runner)\n"
+        f"🛡️ Level 1 (+1.0R): *${trade['rescue_tp']:.4f}* (30% Book + Fee BE)\n"
+        f"🎯 Target 1 (+1.9R): *${trade['tp1_price']:.4f}* (30% Book + SL Lock @ +1.2R)\n"
+        f"🚀 Open Runner (40%): *Dynamic Peak Trail (-0.50R)*\n"
         f"🕒 Time: `{trade['entry_time']}` IST\n"
         f"💡 _Setup: {trade.get('setup_type', 'Option 2 Elite Sniper')}_"
     )
@@ -60,12 +60,12 @@ def notify_entry(trade):
 def notify_rescue_hit(trade, pnl_rescue_inr):
     """Alerts when Level 1 (+1.0R) is hit and SL is locked to Elevated Breakeven (+0.18% Fee Shield)."""
     msg = (
-        f"🛡️ *[LEVEL 1 HIT - 40% PROFIT BOOKED]* 💰\n"
+        f"🛡️ *[LEVEL 1 HIT - 30% PROFIT SECURED]* 💰\n"
         f"═══════════════════════\n"
         f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Profit Secured (40%): *+{config.format_inr(pnl_rescue_inr)}*\n"
+        f"💵 Profit Secured (30%): *+{config.format_inr(pnl_rescue_inr)}*\n"
         f"🔒 *Stop-Loss Shifted to ELEVATED BREAKEVEN (${trade['sl_price']:.4f} ~₹{trade['sl_price']*config.USD_INR_RATE:,.2f})*\n"
-        f"🛡️ 100% Exchange fees covered! Trade is now *RISK-FREE*!\n"
+        f"🛡️ 100% Exchange fees covered! Trade is now *100% RISK-FREE*!\n"
         f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
     )
     send_alert(msg)
@@ -73,12 +73,12 @@ def notify_rescue_hit(trade, pnl_rescue_inr):
 def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
     """Alerts when Target 1 hits and trails SL into profit."""
     msg = (
-        f"🎯 *[TARGET 1 HIT - 40% PROFIT BOOKED]* 💰\n"
+        f"🎯 *[TARGET 1 HIT - 30% PROFIT SECURED]* 💰\n"
         f"═══════════════════════\n"
         f"🪙 Asset: *{trade['symbol']}*\n"
-        f"💵 Target 1 Profit (40%): *+{config.format_inr(pnl_tp1_inr)}*\n"
-        f"📈 *Trailing SL locked in PROFIT at ${new_sl:.4f} (~₹{new_sl*config.USD_INR_RATE:,.2f}) (+1.0R)*\n"
-        f"🚀 20% Runner open for Target 2 Home Run!\n"
+        f"💵 Target 1 Profit (30%): *+{config.format_inr(pnl_tp1_inr)}*\n"
+        f"🔒 *SL RATCHET LOCKED IN SOLID PROFIT: ${new_sl:.4f} (~₹{new_sl*config.USD_INR_RATE:,.2f}) (+1.2R Floor)!*\n"
+        f"🚀 *Remaining 40% Runner is now dynamically trailing! No fixed cap!*\n"
         f"🕒 Time: `{config.get_now_ist().strftime('%H:%M:%S')}` IST"
     )
     send_alert(msg)
@@ -86,7 +86,7 @@ def notify_tp1_hit(trade, pnl_tp1_inr, new_sl):
 def notify_tp2_hit(trade, total_pnl_inr):
     """Alerts when Target 2 Runner (3.0R) hits."""
     msg = (
-        f"🚀 *[TARGET 2 RUNNER HIT - HOME RUN!]* 🏆\n"
+        f"🚀 *[RUNNER MEGA WIN - HOME RUN!]* 🏆\n"
         f"═══════════════════════\n"
         f"🪙 Asset: *{trade['symbol']}*\n"
         f"💰 Total Realized PnL: *+{config.format_inr(total_pnl_inr)}*\n"
@@ -96,12 +96,15 @@ def notify_tp2_hit(trade, total_pnl_inr):
     send_alert(msg)
 
 def notify_sl_hit(trade, total_pnl_inr, reason):
-    """Alerts when Stop Loss or Breakeven exit triggers."""
-    if "BREAKEVEN" in reason or total_pnl_inr >= 0:
-        icon = "🛡️ *[BREAKEVEN EXIT - PROTECTED]*"
-        verdict = f"✅ Secured Profit: *+{config.format_inr(total_pnl_inr)}* (Zero Loss!)"
+    """Alerts when Stop Loss, Breakeven, or Ratchet Trailing exit triggers."""
+    if "TRAILING" in reason or "LOCK" in reason or total_pnl_inr > 0:
+        icon = "🎉 *[40% RUNNER TRAILING EXIT IN PROFIT!]* 💰"
+        verdict = f"✅ Total Trade Profit: *+{config.format_inr(total_pnl_inr)}* (Win Banked!)"
+    elif "BREAKEVEN" in reason:
+        icon = "🛡️ *[BREAKEVEN EXIT - ZERO LOSS SHIELD]*"
+        verdict = f"✅ Secured Profit: *+{config.format_inr(total_pnl_inr)}* (Capital Safe!)"
     else:
-        icon = "❌ *[STOP LOSS TRIGGERED]*"
+        icon = "❌ *[INITIAL STOP LOSS TRIGGERED]*"
         verdict = f"🔻 Loss: *-{config.format_inr(abs(total_pnl_inr))}*"
 
     msg = (

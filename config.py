@@ -62,26 +62,28 @@ def format_inr(amount):
     return f"₹{amount:,.2f}"
 
 # ========================================================================================
-# 6. ASSET UNIVERSE: TOP 5 LEADERBOARD COINS (85.2% WIN RATE ON DELTA INDIA)
+# 6. ASSET UNIVERSE: TOP 7 LEADERBOARD COINS (OPTIMIZED MODEL C)
 # ========================================================================================
 SYMBOLS = [
+    'BTCUSD',    # Bitcoin (Highest Liquidity & Volume)
+    'XRPUSD',    # Ripple (Cleanest Range Sweeps)
+    'SOLUSD',    # Solana (Fastest Momentum)
     'DOGEUSD',   # Dogecoin
-    'ADAUSD',    # Cardano
     'AVAXUSD',   # Avalanche
     'BNBUSD',    # BNB
-    'SOLUSD'     # Solana
+    'ADAUSD'     # Cardano
 ]
 
 # ========================================================================================
-# 7. ICT SESSIONS & TIMEFRAMES (LOCKED STRICTLY TO IST UTC+5:30)
+# 7. ELITE SNIPER TIMEFRAMES & SESSIONS (LOCKED STRICTLY TO IST UTC+5:30)
 # ========================================================================================
 CANDLE_RESOLUTION = "3m"         # 3-Minute Precision Entry Candles (Sniper Execution)
-TREND_RESOLUTION = "1h"          # 1-Hour Trend Bias (20-EMA Alignment)
+TREND_RESOLUTION = "1h"          # 1-Hour Trend Bias (20-EMA Alignment - Highest Profit Anchor)
 
 WEAK_HOURS_IST = [1, 9]          # Skip 1-2 AM and 9-10 AM IST low-volume chop hours
 LOOKBACK_SWING_BARS = 16         # 16 bars lookback for liquidity swing high/low
-VOLUME_MULT_MIN = 1.30           # Minimum 1.30x volume expansion
-WICK_RATIO_MIN = 0.50            # Minimum 50% absorption wick ratio
+VOLUME_MULT_MIN = 1.25           # Minimum 1.25x volume expansion (Model C Optimized)
+WICK_RATIO_MIN = 0.45            # Minimum 45% absorption wick ratio (Model C Optimized)
 DOUBLE_SWEEP_BUFFER_PCT = 0.0008 # Protective buffer beyond sweep wick tip
 FVG_MAX_WAIT_BARS = 4            # Wait up to 4 bars for pullback into FVG limit zone
 MIN_SL_PCT = 0.0018              # Minimum 0.18% SL
@@ -111,20 +113,22 @@ OTE_FIB_DEEP = 0.705             # 0.705 Fibonacci sweet spot
 SL_ATR_BUFFER = 0.25             # 0.25 ATR protective buffer beyond sweep wick tip
 
 # ========================================================================================
-# 9. RESCUED RISK MANAGEMENT RULES (40% / 40% / 20% Golden Balance + Elevated Fee Shield)
+# 9. RESCUED RISK MANAGEMENT RULES (30% / 30% / 40% Open Runner + Ratchet Trail Lock)
 # ========================================================================================
-# Level 1: +1.0R -> Book 40% profit immediately & move SL to Elevated Breakeven (+0.18% Fee Shield)
+# Level 1: +1.0R -> Book 30% profit immediately & move SL to Elevated Breakeven (+0.18% Fee Shield)
 RESCUE_PROFIT_R = 1.0
-RESCUE_CLOSE_RATIO = 0.40
+RESCUE_CLOSE_RATIO = 0.30
 ELEVATED_BREAKEVEN_PCT = 0.0018  # +0.18% fee shield covers 100% exchange fees & GST on reversal!
 
-# Level 2: +1.9R -> Book 40% profit & lock Trailing SL at +1.0R
+# Level 2: +1.9R -> Book 30% profit & Lock SL at +1.2R Guaranteed Profit Floor!
 TP1_R = 1.9
-TP1_CLOSE_RATIO = 0.40
+TP1_CLOSE_RATIO = 0.30
+TP1_LOCK_SL_R = 1.2              # Lock SL at +1.2R guaranteed profit floor
 
-# Level 3: +3.0R Runner (Remaining 20%) -> Home run exit
-TP2_R = 3.0
-RUNNER_RATIO = 0.20
+# Level 3: Open 40% Runner -> No fixed cap, dynamically trails peak - 0.50R
+TP2_R = 3.0                      # Reference target
+RUNNER_RATIO = 0.40
+TRAIL_DISTANCE_R = 0.50          # Distance behind peak price to trail 40% runner
 
 # ========================================================================================
 # 10. CLOUD KEEPALIVE & HEALTHCHECK SERVER (RENDER DEPLOYMENT)

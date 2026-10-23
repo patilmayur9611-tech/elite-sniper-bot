@@ -201,6 +201,8 @@ class DeltaClient:
             "margin_used_inr": margin_used_inr,
             "rescue_hit": False,
             "tp1_hit": False,
+            "peak_price": entry_price,
+            "peak_r": 0.0,
             "realized_pnl_inr": 0.0,
             "setup_type": setup.get("setup_type", "ICT_OTE")
         }
@@ -214,9 +216,9 @@ class DeltaClient:
     def manage_positions(self):
         """
         Monitors active positions against live prices in INR:
-        1. Checks Level 1 Rescued TP (+1.0R / Asian Mid): Books 30% profit in INR & locks SL to Breakeven!
-        2. Checks Level 2 TP1 (Asian High/Low): Books 40% profit in INR & locks trailing SL!
-        3. Checks Level 3 TP2 Runner (3.0R): Books final 30% profit in INR!
+        1. Checks Level 1 Rescued TP (+1.0R): Books 30% profit in INR & locks SL to Elevated Breakeven!
+        2. Checks Level 2 TP1 (+1.9R): Books 30% profit in INR & RATCHET LOCKS SL at +1.2R Guaranteed Profit!
+        3. Dynamically trails remaining 40% open runner behind peak price (-0.50R)!
         4. Checks Stop Loss execution.
         """
         if not self.state["open_positions"]:
@@ -234,18 +236,26 @@ class DeltaClient:
             entry_price = trade["entry_price"]
             sl_price = trade["sl_price"]
             pos_inr = trade["position_inr"]
+            r_dist = abs(entry_price - trade["initial_sl"])
+
+            # Track peak price and peak R-multiple
+            current_r = ((current_price - entry_price) / r_dist) if side == "LONG" else ((entry_price - current_price) / r_dist)
+            if current_r > trade.get("peak_r", 0.0):
+                trade["peak_r"] = current_r
+                trade["peak_price"] = current_price
 
             # ---------------------------------------------------------
-            # 1. RESCUED RULE (+1.0R): 40% Profit in INR & Elevated Breakeven Lock (+0.18% Fee Shield)
+            # 1. RESCUED RULE (+1.0R): 30% Profit in INR & Elevated Breakeven Lock (+0.18% Fee Shield)
             # ---------------------------------------------------------
             if not trade["rescue_hit"]:
                 hit_rescue = (current_price >= trade["rescue_tp"]) if side == "LONG" else (current_price <= trade["rescue_tp"])
                 if hit_rescue:
-                    closed_val_inr = pos_inr * config.RESCUE_CLOSE_RATIO
+                    close_ratio = getattr(config, "RESCUE_CLOSE_RATIO", 0.30)
+                    closed_val_inr = pos_inr * close_ratio
                     r_dist_pct = abs(trade["rescue_tp"] - entry_price) / entry_price
                     pnl_rescue_inr = closed_val_inr * r_dist_pct
 
-                    trade["remaining_ratio"] -= config.RESCUE_CLOSE_RATIO
+                    trade["remaining_ratio"] -= close_ratio
                     trade["realized_pnl_inr"] += pnl_rescue_inr
                     trade["rescue_hit"] = True
 
@@ -257,64 +267,68 @@ class DeltaClient:
                     self._apply_realized_pnl_inr(pnl_rescue_inr)
                     self.save_state()
                     telegram_notifier.notify_rescue_hit(trade, pnl_rescue_inr)
-                    print(f"🛡️ [RESCUED TRIGGERED] {symbol} booked 40% (+{config.format_inr(pnl_rescue_inr)}) & SL moved to ELEVATED BREAKEVEN (${elevated_be:.4f})!")
+                    print(f"🛡️ [LEVEL 1 HIT] {symbol} booked 30% (+{config.format_inr(pnl_rescue_inr)}) & SL moved to ELEVATED BREAKEVEN (${elevated_be:.4f})!")
 
             # ---------------------------------------------------------
-            # 2. TARGET 1: 40% Profit in INR & Trailing SL Locked at +1.0R
+            # 2. TARGET 1 (+1.9R): 30% Profit in INR & RATCHET SL Locked at +1.2R Guaranteed Floor!
             # ---------------------------------------------------------
             if not trade["tp1_hit"] and trade["rescue_hit"]:
                 hit_tp1 = (current_price >= trade["tp1_price"]) if side == "LONG" else (current_price <= trade["tp1_price"])
                 if hit_tp1:
-                    closed_val_inr = pos_inr * config.TP1_CLOSE_RATIO
+                    close_ratio = getattr(config, "TP1_CLOSE_RATIO", 0.30)
+                    closed_val_inr = pos_inr * close_ratio
                     r_dist_pct = abs(trade["tp1_price"] - entry_price) / entry_price
                     pnl_tp1_inr = closed_val_inr * r_dist_pct
 
-                    trade["remaining_ratio"] -= config.TP1_CLOSE_RATIO
+                    trade["remaining_ratio"] -= close_ratio
                     trade["realized_pnl_inr"] += pnl_tp1_inr
                     trade["tp1_hit"] = True
 
-                    # Lock SL to +1.0R in guaranteed profit for remaining 20% runner
-                    r_dist = abs(entry_price - trade["initial_sl"])
-                    trade["sl_price"] = entry_price + (1.0 * r_dist) if side == "LONG" else entry_price - (1.0 * r_dist)
+                    # RATCHET LOCK: Lock SL to +1.2R in guaranteed profit floor for remaining 40% runner!
+                    lock_r = getattr(config, "TP1_LOCK_SL_R", 1.2)
+                    ratchet_sl = entry_price + (lock_r * r_dist) if side == "LONG" else entry_price - (lock_r * r_dist)
+                    trade["sl_price"] = ratchet_sl
 
                     self._apply_realized_pnl_inr(pnl_tp1_inr)
                     self.save_state()
                     telegram_notifier.notify_tp1_hit(trade, pnl_tp1_inr, trade["sl_price"])
-                    print(f"💰 [TP1 HIT] {symbol} booked 40% (+{config.format_inr(pnl_tp1_inr)}) & trailing SL locked at +1.0R!")
+                    print(f"💰 [TARGET 1 HIT] {symbol} booked 30% (+{config.format_inr(pnl_tp1_inr)}) & SL RATCHET LOCKED AT +{lock_r}R GUARANTEED PROFIT (${ratchet_sl:.4f})!")
 
             # ---------------------------------------------------------
-            # 3. TARGET 2 RUNNER (3.0R Home Run): Final 20% Profit in INR
+            # 3. OPEN 40% RUNNER DYNAMIC TRAILING (Peak - 0.50R)
             # ---------------------------------------------------------
-            hit_tp2 = (current_price >= trade["tp2_price"]) if side == "LONG" else (current_price <= trade["tp2_price"])
-            if hit_tp2 and trade["tp1_hit"]:
-                closed_val_inr = pos_inr * trade["remaining_ratio"]
-                r_dist_pct = abs(trade["tp2_price"] - entry_price) / entry_price
-                pnl_tp2_inr = closed_val_inr * r_dist_pct
+            if trade["tp1_hit"]:
+                trail_dist = getattr(config, "TRAIL_DISTANCE_R", 0.50)
+                lock_floor_r = getattr(config, "TP1_LOCK_SL_R", 1.2)
+                trail_r = trade.get("peak_r", 0.0) - trail_dist
 
-                total_trade_pnl_inr = trade["realized_pnl_inr"] + pnl_tp2_inr
-                self._apply_realized_pnl_inr(pnl_tp2_inr)
-
-                telegram_notifier.notify_tp2_hit(trade, total_trade_pnl_inr)
-                symbols_to_close.append((symbol, "TARGET_2_FULL_WIN", total_trade_pnl_inr, current_price))
-                continue
+                if trail_r > lock_floor_r:
+                    new_trail_sl = entry_price + (trail_r * r_dist) if side == "LONG" else entry_price - (trail_r * r_dist)
+                    is_better = (new_trail_sl > trade["sl_price"]) if side == "LONG" else (new_trail_sl < trade["sl_price"])
+                    if is_better:
+                        old_sl = trade["sl_price"]
+                        trade["sl_price"] = new_trail_sl
+                        self.save_state()
+                        print(f"📈 [DYNAMIC TRAIL ADVANCED] {symbol} 40% runner SL advanced from ${old_sl:.4f} to ${new_trail_sl:.4f} (+{trail_r:.2f}R from peak {trade['peak_r']:.2f}R)!")
 
             # ---------------------------------------------------------
-            # 4. STOP LOSS CHECK (Elevated Breakeven, Trailing SL, or Initial SL)
+            # 4. STOP LOSS CHECK (Elevated Breakeven, Ratchet Trailing SL, or Initial SL)
             # ---------------------------------------------------------
-            hit_sl = (current_price <= sl_price) if side == "LONG" else (current_price >= sl_price)
+            hit_sl = (current_price <= trade["sl_price"]) if side == "LONG" else (current_price >= trade["sl_price"])
             if hit_sl:
                 remaining_val_inr = pos_inr * trade["remaining_ratio"]
-                
+                exit_sl = trade["sl_price"]
+
                 # Check direction of exit relative to entry
                 if side == "LONG":
-                    gain_pct = (sl_price - entry_price) / entry_price
+                    gain_pct = (exit_sl - entry_price) / entry_price
                 else:
-                    gain_pct = (entry_price - sl_price) / entry_price
+                    gain_pct = (entry_price - exit_sl) / entry_price
 
                 pnl_remaining_inr = remaining_val_inr * gain_pct
 
                 if trade["tp1_hit"]:
-                    reason = "TRAILING_LOCK_EXIT"
+                    reason = "RUNNER_TRAILING_LOCK_EXIT"
                 elif trade["rescue_hit"]:
                     reason = "ELEVATED_BREAKEVEN_EXIT"
                 else:
