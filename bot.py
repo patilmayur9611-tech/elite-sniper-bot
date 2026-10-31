@@ -1,235 +1,311 @@
-"""
-========================================================================================
-ELITE SNIPER MASTER BOT - MAIN RUNNER (INR EDITION)
-Delta Exchange India (api.india.delta.exchange)
-Currency: Indian Rupee (INR - ₹)
-Time strictly locked to Indian Standard Time (IST, UTC+5:30)
-========================================================================================
-"""
-import time
 import os
+import sys
+import time
+import json
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime, timezone, timedelta
+import requests
 import config
 from delta_client import DeltaClient
-from strategy import StrategyEngine
-import telegram_notifier
+from strategy import MomentumStrategy
+import telegram_helper
 
-client = DeltaClient()
-strategy = StrategyEngine(client)
+# Indian Standard Time (IST = UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+PORT = int(os.environ.get("PORT", 10000))
+bot_instance = None
 
-class KeepAliveDashboardHandler(BaseHTTPRequestHandler):
+class HealthHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        """Responds to UptimeRobot HEAD ping with 200 OK to keep service alive."""
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-type", "application/json")
         self.end_headers()
 
     def do_GET(self):
-        state = client.state
-        trades = state.get("closed_trades", [])
-        wins = sum(1 for t in trades if t.get("final_pnl_inr", 0) > 0)
-        losses = sum(1 for t in trades if t.get("final_pnl_inr", 0) < 0)
-        total = len(trades)
-        win_rate = (wins / total * 100) if total > 0 else 0.0
-
-        now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
-        active_cap = state.get("active_capital_inr", config.INITIAL_CAPITAL_INR)
-        banked = state.get("banked_profit_inr", 0.0)
-        net_pnl = state.get("total_net_pnl_inr", 0.0)
-
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Elite Sniper Bot (INR Edition)</title>
-            <meta http-equiv="refresh" content="30">
-            <style>
-                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }}
-                .container {{ max-width: 950px; margin: 0 auto; }}
-                .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 20px; }}
-                h2 {{ color: #58a6ff; margin: 0; }}
-                .badge {{ padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-left: 5px; }}
-                .badge-green {{ background: #238636; color: white; }}
-                .badge-blue {{ background: #1f6feb; color: white; }}
-                .badge-orange {{ background: #d29922; color: #0d1117; }}
-                .badge-purple {{ background: #8957e5; color: white; }}
-                .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 25px; }}
-                .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 15px; }}
-                .card-title {{ font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 5px; }}
-                .card-val {{ font-size: 20px; font-weight: bold; color: #f0f6fc; }}
-                .pos-table {{ width: 100%; border-collapse: collapse; background: #161b22; border-radius: 6px; overflow: hidden; }}
-                .pos-table th, .pos-table td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #30363d; font-size: 13px; }}
-                .pos-table th {{ background: #21262d; color: #8b949e; }}
-                .text-green {{ color: #3fb950; font-weight: bold; }}
-                .text-red {{ color: #f85149; font-weight: bold; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>🎯 Elite Sniper Bot - Delta Exchange India (INR)</h2>
-                    <div>
-                        <span class="badge badge-purple">🇮🇳 IST: {now_ist_str}</span>
-                        <span class="badge badge-green">INR (₹) EDITION</span>
-                        <span class="badge badge-orange">{config.LEVERAGE}x LEVERAGE</span>
-                        <span class="badge badge-blue">{'PAPER TRADING' if config.PAPER_TRADING else 'LIVE TRADING'}</span>
-                    </div>
-                </div>
-
-                <div class="grid">
-                    <div class="card">
-                        <div class="card-title">Active INR Capital</div>
-                        <div class="card-val">{config.format_inr(active_cap)}</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">Banked Vault (Cap ₹90L)</div>
-                        <div class="card-val text-green">{config.format_inr(banked)}</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">Total Realized PnL</div>
-                        <div class="card-val {'text-green' if net_pnl >= 0 else 'text-red'}">{'+' if net_pnl >= 0 else ''}{config.format_inr(net_pnl)}</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">Win Rate</div>
-                        <div class="card-val">{win_rate:.1f}% ({wins}W / {losses}L)</div>
-                    </div>
-                </div>
-
-                <h3>Active Positions ({len(state.get('open_positions', {}))})</h3>
-                <table class="pos-table">
-                    <thead>
-                        <tr>
-                            <th>Coin</th>
-                            <th>Side</th>
-                            <th>Entry (USD / INR)</th>
-                            <th>SL</th>
-                            <th>Rescue (+1R)</th>
-                            <th>Target 1</th>
-                            <th>Margin (20x INR)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
-        open_pos = state.get("open_positions", {})
-        if not open_pos:
-            html += "<tr><td colspan='7' style='text-align: center; color: #8b949e; padding: 20px;'>No active positions. Scanning Top 5 coins...</td></tr>"
-        else:
-            for sym, p in open_pos.items():
-                side_cls = "text-green" if p['side'] == "LONG" else "text-red"
-                html += f"""
-                <tr>
-                    <td><b>{sym}</b></td>
-                    <td class="{side_cls}">{p['side']}</td>
-                    <td>${p['entry_price']:.4f} <small style='color:#8b949e'>(~₹{p.get('entry_inr_est', 0):,.2f})</small></td>
-                    <td>${p['sl_price']:.4f} <small style='color:#8b949e'>(~₹{p['sl_price']*config.USD_INR_RATE:,.2f})</small></td>
-                    <td>${p['rescue_tp']:.4f} <small style='color:#8b949e'>(~₹{p['rescue_tp']*config.USD_INR_RATE:,.2f})</small></td>
-                    <td>${p['tp1_price']:.4f} <small style='color:#8b949e'>(~₹{p['tp1_price']*config.USD_INR_RATE:,.2f})</small></td>
-                    <td>{config.format_inr(p.get('margin_used_inr', 0))}</td>
-                </tr>
-                """
-
-        html += """
-                    </tbody>
-                </table>
-            </div>
-        </body>
-        </html>
-        """
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(html.encode('utf-8'))
+        
+        open_pos = 0
+        wallet = config.TOTAL_WALLET_CAPITAL
+        if bot_instance and hasattr(bot_instance, 'client'):
+            open_pos = len(bot_instance.client.paper_state.get("open_positions", {}))
+            wallet = bot_instance.client.paper_state.get("wallet_balance", config.TOTAL_WALLET_CAPITAL)
+            
+        health_data = {
+            "status": "ONLINE_ACTIVE",
+            "bot": "Delta Early Momentum Hunter",
+            "mode": "PAPER_TRADING" if config.PAPER_TRADING else "LIVE_REAL_MONEY",
+            "wallet_balance": wallet,
+            "open_positions": open_pos,
+            "max_positions": config.MAX_CONCURRENT_POSITIONS,
+            "ist_time": datetime.now(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
+        }
+        self.wfile.write(json.dumps(health_data).encode("utf-8"))
 
     def log_message(self, format, *args):
-        return  # Suppress HTTP access noise
+        pass  # Suppress health check spam in console/Render logs
 
-def run_http_server():
-    server = HTTPServer((config.SERVER_HOST, config.SERVER_PORT), KeepAliveDashboardHandler)
-    print(f"🌐 Keepalive Web Server listening on port {config.SERVER_PORT}")
-    server.serve_forever()
+def start_http_server():
+    """Runs lightweight HTTP server in background so Render never sleeps or crashes on port check"""
+    try:
+        server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+        print(f"🌐 [ANTI-SLEEP SERVER] Listening on port {PORT} for 24/7 Keep-Alive...")
+        server.serve_forever()
+    except Exception as e:
+        print(f"⚠️ HTTP Server notice: {e}")
 
-def run_telegram_poller():
+def self_ping_worker():
+    """Pings own Render URL every 8 minutes to prevent Render Free Tier from sleeping (15-min idle timeout)"""
+    time.sleep(30) # Initial wait
     while True:
-        try:
-            telegram_notifier.handle_telegram_updates(client)
-        except Exception as e:
-            pass
-        time.sleep(2)
+        url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(config, "RENDER_URL", "")
+        if url:
+            if not url.startswith("http"):
+                url = f"https://{url}"
+            try:
+                r = requests.get(f"{url}/", timeout=10)
+                print(f"🔄 [ANTI-SLEEP PING] Successfully pinged {url} (Status: {r.status_code})")
+            except Exception as e:
+                print(f"⚠️ [ANTI-SLEEP PING] Ping error: {e}")
+        time.sleep(480) # Ping every 8 minutes (Render sleeps at 15 mins)
 
-def main():
-    now_ist_str = config.get_now_ist().strftime('%Y-%m-%d %I:%M:%S %p')
-    active_cap = client.state.get('active_capital_inr', config.INITIAL_CAPITAL_INR)
-    banked = client.state.get('banked_profit_inr', 0.0)
+class MomentumHunterBot:
+    def __init__(self):
+        global bot_instance
+        bot_instance = self
+        
+        self.client = DeltaClient()
+        self.strategy = MomentumStrategy()
+        
+        mode_str = "📝 PAPER TRADING (Safe Simulation)" if config.PAPER_TRADING else "🔴 LIVE REAL MONEY"
+        print("=" * 68)
+        print("🚀 DELTA EXCHANGE INDIA - EARLY MOMENTUM HUNTER")
+        print("=" * 68)
+        print(f"Mode: {mode_str}")
+        print(f"Wallet Capital: ₹{config.TOTAL_WALLET_CAPITAL:,.0f} INR")
+        print(f"Position Notional: ₹{config.POSITION_NOTIONAL_INR:,.0f} INR (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)")
+        print(f"Max Concurrent Positions: {config.MAX_CONCURRENT_POSITIONS}")
+        print("=" * 68)
+        
+        # Send Telegram Bot Online Notification
+        startup_msg = (
+            f"🚀 *Delta Early Momentum Hunter Online*\n\n"
+            f"• *Mode:* `{mode_str}`\n"
+            f"• *Wallet Capital:* ₹{config.TOTAL_WALLET_CAPITAL:,.0f}\n"
+            f"• *Position Size:* ₹{config.POSITION_NOTIONAL_INR:,.0f} (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)\n"
+            f"• *Max Positions:* {config.MAX_CONCURRENT_POSITIONS}\n"
+            f"• *Anti-Sleep Shield:* Active 24/7 (Port {PORT})\n"
+            f"• *Pairs Monitored:* Top {len(self.client.products)} Volume Perps"
+        )
+        telegram_helper.send_alert(startup_msg)
 
-    print("=" * 90)
-    print("🎯 ELITE SNIPER MASTER BOT - DELTA EXCHANGE INDIA (INR EDITION)")
-    print(f"   Mode: {'🟢 PAPER TRADING (Safe Simulation)' if config.PAPER_TRADING else '🔥 REAL TRADING'}")
-    print(f"   Clock: {now_ist_str} IST (Locked UTC+5:30)")
-    print(f"   Currency: Indian Rupee (INR - ₹)")
-    print(f"   Active Capital: {config.format_inr(active_cap)} | Banked Vault: {config.format_inr(banked)}")
-    print(f"   Leverage: {config.LEVERAGE}x | Risk Per Trade: {config.RISK_PER_TRADE_PCT*100:.1f}%")
-    print(f"   Top 5 Coins: {', '.join(config.SYMBOLS)}")
-    print(f"   Sessions (IST): Asian (05:30-12:30), London (12:30-16:30), NY (17:30-22:30)")
-    print("=" * 90)
+    def execute_entry(self, symbol: str, signal: dict):
+        open_pos = self.client.paper_state["open_positions"]
+        if len(open_pos) >= config.MAX_CONCURRENT_POSITIONS:
+            return
+            
+        if symbol in open_pos:
+            return
+            
+        side = signal['side']
+        entry_price = self.client.round_price(symbol, signal['price'])
+        contracts = self.client.calculate_contracts(symbol, entry_price)
+        atr = signal['atr']
+        
+        if side == 'BUY':
+            initial_sl = self.client.round_price(symbol, entry_price - (1.3 * atr))
+            tp1_price = self.client.round_price(symbol, entry_price * 1.035) # +3.5%
+        else: # SHORT
+            initial_sl = self.client.round_price(symbol, entry_price + (1.1 * atr))
+            tp1_price = self.client.round_price(symbol, entry_price * 0.965) # -3.5%
+            
+        pos_data = {
+            'symbol': symbol,
+            'side': side,
+            'contracts': contracts,
+            'entry_price': entry_price,
+            'current_sl': initial_sl,
+            'initial_sl': initial_sl,
+            'tp1_price': tp1_price,
+            'tp1_hit': False,
+            'peak_price': entry_price,
+            'entry_time': datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST'),
+            'atr': atr
+        }
+        
+        open_pos[symbol] = pos_data
+        self.client.paper_state["active_margin"] += config.MARGIN_PER_TRADE
+        self.client.save_paper_state()
+        
+        print(f"\n⚡ [{datetime.now(IST).strftime('%H:%M:%S')}] NEW {side} ENTRY: {symbol}")
+        print(f"   Price: {entry_price} | Contracts: {contracts} (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})")
+        print(f"   Stop Loss: {initial_sl} | TP1 (+3.5%): {tp1_price}")
+        print(f"   Slots In Use: {len(open_pos)}/{config.MAX_CONCURRENT_POSITIONS}")
+        
+        alert = (
+            f"🎯 *NEW {side} SIGNAL*\n\n"
+            f"• *Coin:* `{symbol}`\n"
+            f"• *Entry:* `{entry_price}`\n"
+            f"• *Contracts:* `{contracts}` (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})\n"
+            f"• *Margin Used:* ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x\n"
+            f"• *Stop Loss:* `{initial_sl}` (~-1.0%)\n"
+            f"• *Target 1:* `{tp1_price}` (+3.5%)\n"
+            f"• *Signal:* {signal['reason']}"
+        )
+        telegram_helper.send_alert(alert)
 
-    # 1. Start Web Dashboard Keep-Alive thread
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
+    def manage_positions(self):
+        open_pos = self.client.paper_state["open_positions"]
+        if not open_pos:
+            return
+            
+        symbols = list(open_pos.keys())
+        for sym in symbols:
+            pos = open_pos[sym]
+            side = pos['side']
+            curr_price = self.client.get_mark_price(sym)
+            if curr_price <= 0:
+                continue
+                
+            entry_p = pos['entry_price']
+            atr = pos['atr']
+            
+            if side == 'BUY':
+                pos['peak_price'] = max(pos['peak_price'], curr_price)
+                
+                # Check Stop Loss
+                if curr_price <= pos['current_sl']:
+                    exit_p = pos['current_sl']
+                    pnl_pct = (exit_p - entry_p) / entry_p
+                    pnl_inr = config.POSITION_NOTIONAL_INR * pnl_pct
+                    
+                    print(f"\n🛑 [STOP LOSS HIT] {sym} (LONG) at {exit_p} | PnL: {pnl_pct*100:+.2f}% (₹{pnl_inr:+.1f} INR)")
+                    
+                    self.client.paper_state["wallet_balance"] += pnl_inr
+                    self.client.paper_state["active_margin"] = max(0.0, self.client.paper_state["active_margin"] - config.MARGIN_PER_TRADE)
+                    self.client.paper_state["trade_history"].append({
+                        "symbol": sym, "side": side, "entry": entry_p, "exit": exit_p, "pnl_pct": pnl_pct, "pnl_inr": pnl_inr, "time": datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p')
+                    })
+                    del open_pos[sym]
+                    self.client.save_paper_state()
+                    
+                    telegram_helper.send_alert(
+                        f"🛑 *POSITION CLOSED (LONG)*\n\n"
+                        f"• *Coin:* `{sym}`\n"
+                        f"• *Exit Price:* `{exit_p}`\n"
+                        f"• *PnL:* `{pnl_pct*100:+.2f}%` (*₹{pnl_inr:+.1f} INR*)\n"
+                        f"• *Wallet Balance:* ₹{self.client.paper_state['wallet_balance']:,.1f}"
+                    )
+                    continue
+                    
+                # Check TP1 (+3.5%)
+                if curr_price >= pos['tp1_price'] and not pos['tp1_hit']:
+                    pos['tp1_hit'] = True
+                    pos['current_sl'] = self.client.round_price(sym, entry_p * 1.001)
+                    self.client.save_paper_state()
+                    
+                    print(f"\n🎉 [TP1 HIT] {sym} reached +3.5%! SL moved to BREAKEVEN ({pos['current_sl']}). Free slot opened!")
+                    telegram_helper.send_alert(
+                        f"🎉 *TP1 HIT (+3.5%) — {sym}*\n\n"
+                        f"• 30% Profit Booked!\n"
+                        f"• Stop Loss moved to *BREAKEVEN* (`{pos['current_sl']}`)\n"
+                        f"• Trade is now *100% Risk-Free*!\n"
+                        f"• 70% Runner riding with Trailing Stop."
+                    )
+                    
+                # Trailing Stop for Runner
+                if pos['tp1_hit']:
+                    trail = self.client.round_price(sym, pos['peak_price'] - (1.4 * atr))
+                    if trail > pos['current_sl']:
+                        pos['current_sl'] = trail
+                        self.client.save_paper_state()
+                        
+            elif side == 'SELL':
+                pos['peak_price'] = min(pos['peak_price'], curr_price)
+                
+                # Check Stop Loss
+                if curr_price >= pos['current_sl']:
+                    exit_p = pos['current_sl']
+                    pnl_pct = (entry_p - exit_p) / entry_p
+                    pnl_inr = config.POSITION_NOTIONAL_INR * pnl_pct
+                    
+                    print(f"\n🛑 [STOP LOSS HIT] {sym} (SHORT) at {exit_p} | PnL: {pnl_pct*100:+.2f}% (₹{pnl_inr:+.1f} INR)")
+                    
+                    self.client.paper_state["wallet_balance"] += pnl_inr
+                    self.client.paper_state["active_margin"] = max(0.0, self.client.paper_state["active_margin"] - config.MARGIN_PER_TRADE)
+                    self.client.paper_state["trade_history"].append({
+                        "symbol": sym, "side": side, "entry": entry_p, "exit": exit_p, "pnl_pct": pnl_pct, "pnl_inr": pnl_inr, "time": datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p')
+                    })
+                    del open_pos[sym]
+                    self.client.save_paper_state()
+                    
+                    telegram_helper.send_alert(
+                        f"🛑 *POSITION CLOSED (SHORT)*\n\n"
+                        f"• *Coin:* `{sym}`\n"
+                        f"• *Exit Price:* `{exit_p}`\n"
+                        f"• *PnL:* `{pnl_pct*100:+.2f}%` (*₹{pnl_inr:+.1f} INR*)\n"
+                        f"• *Wallet Balance:* ₹{self.client.paper_state['wallet_balance']:,.1f}"
+                    )
+                    continue
+                    
+                # Check TP1 (-3.5%)
+                if curr_price <= pos['tp1_price'] and not pos['tp1_hit']:
+                    pos['tp1_hit'] = True
+                    pos['current_sl'] = self.client.round_price(sym, entry_p * 0.999)
+                    self.client.save_paper_state()
+                    
+                    print(f"\n🎉 [TP1 HIT] {sym} (SHORT) reached +3.5%! SL moved to BREAKEVEN ({pos['current_sl']}).")
+                    telegram_helper.send_alert(
+                        f"🎉 *TP1 HIT (SHORT +3.5%) — {sym}*\n\n"
+                        f"• Stop Loss moved to *BREAKEVEN* (`{pos['current_sl']}`)\n"
+                        f"• Trade is now *100% Risk-Free*!\n"
+                        f"• 70% Runner riding with Trailing Stop."
+                    )
+                    
+                # Trailing Runner
+                if pos['tp1_hit']:
+                    trail = self.client.round_price(sym, pos['peak_price'] + (1.1 * atr))
+                    if trail < pos['current_sl']:
+                        pos['current_sl'] = trail
+                        self.client.save_paper_state()
 
-    # 2. Start Telegram remote poller thread
-    tg_thread = threading.Thread(target=run_telegram_poller, daemon=True)
-    tg_thread.start()
-
-    # Startup Notification to Telegram
-    risk_inr_val = active_cap * config.RISK_PER_TRADE_PCT
-    telegram_notifier.send_alert(
-        f"🤖 *ELITE SNIPER BOT ONLINE (DELTA INDIA INR ENGINE)!*\n"
-        f"═══════════════════════\n"
-        f"🏷️ Mode: {'🟢 Paper Trading' if config.PAPER_TRADING else '🔥 Real Trading'}\n"
-        f"🕒 Server Clock: `{now_ist_str}` IST (Locked UTC+5:30)\n"
-        f"⏱️ Timeframe: `3-Minute Entry + 1-Hour 20-EMA Trend Bias`\n"
-        f"💼 Month Starting Capital: *{config.format_inr(active_cap)}*\n"
-        f"🏦 Hard Cap: *{config.format_inr(config.MAX_ACTIVE_CAPITAL_INR)}*\n"
-        f"🎯 Risk Per Trade: *{config.format_inr(risk_inr_val)} ({config.RISK_PER_TRADE_PCT*100:.1f}%)*\n"
-        f"🛡️ Margin Cushion: *Max 50% (50% Free Cash Reserve)*\n"
-        f"⏳ Cooldown: *2-Hour Loss Cooldown Active*\n"
-        f"🚫 Session Filter: *Skipping 1-2 AM & 9-10 AM IST*\n"
-        f"📊 Targets: *40% @ 1.0R | 40% @ 1.9R | 20% @ 3.0R*\n"
-        f"🛡️ Elevated Breakeven: *+0.18% Fee Shield (100% Fees Covered)*\n"
-        f"🌐 Assets: `{', '.join(config.SYMBOLS)}`\n"
-        f"═══════════════════════\n"
-        f"🚀 Actively scanning 3M candles on Delta Exchange India!"
-    )
-
-    # 3. Main 24/7 Scanning Loop
-    scan_interval = 20  # scan every 20 seconds
-    while True:
-        try:
-            # A. Manage and monitor open positions
-            client.manage_positions()
-
-            # B. Scan symbols for new setups if space available
-            open_count = len(client.state.get("open_positions", {}))
-            if open_count < config.MAX_CONCURRENT_TRADES:
-                for symbol in config.SYMBOLS:
-                    if symbol in client.state.get("open_positions", {}):
-                        continue
-
-                    candles = client.fetch_candles(symbol, resolution=config.CANDLE_RESOLUTION, limit=60)
-                    if len(candles) < 25:
-                        continue
-
-                    setup = strategy.analyze_symbol(symbol, candles)
-                    if setup:
-                        client.open_position(setup)
-                        if len(client.state.get("open_positions", {})) >= config.MAX_CONCURRENT_TRADES:
-                            break
-
-        except Exception as e:
-            print(f"❌ [LOOP ERROR]: {e}")
-
-        time.sleep(scan_interval)
+    def run(self):
+        print(f"\n⚡ Live Scanner active. Scanning Top {len(self.client.products)} Pairs every {config.SCAN_INTERVAL_SECONDS}s...")
+        cycle = 1
+        while True:
+            t_now = datetime.now(IST).strftime('%H:%M:%S')
+            open_count = len(self.client.paper_state["open_positions"])
+            print(f"[{t_now} IST] Cycle #{cycle} | Open Slots: {open_count}/{config.MAX_CONCURRENT_POSITIONS}   ", end="\r")
+            
+            self.manage_positions()
+            
+            for sym in list(self.client.products.keys()):
+                if sym in self.client.paper_state["open_positions"]:
+                    continue
+                df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=30)
+                if df.empty:
+                    continue
+                signal = self.strategy.check_signal(df)
+                if signal:
+                    self.execute_entry(sym, signal)
+                    if len(self.client.paper_state["open_positions"]) >= config.MAX_CONCURRENT_POSITIONS:
+                        break
+            cycle += 1
+            time.sleep(config.SCAN_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    main()
+    # Start Embedded HTTP Server for Render Keep-Alive
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
+    
+    # Start Self-Ping Thread to prevent Render Free Tier Sleep
+    ping_thread = threading.Thread(target=self_ping_worker, daemon=True)
+    ping_thread.start()
+    
+    bot = MomentumHunterBot()
+    try:
+        bot.run()
+    except KeyboardInterrupt:
+        print("\nBot stopped cleanly by user.")
