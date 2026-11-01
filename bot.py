@@ -58,7 +58,7 @@ def start_http_server():
 
 def self_ping_worker():
     """Pings own Render URL every 8 minutes to prevent Render Free Tier from sleeping (15-min idle timeout)"""
-    time.sleep(30) # Initial wait
+    time.sleep(30)
     while True:
         url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(config, "RENDER_URL", "")
         if url:
@@ -69,7 +69,7 @@ def self_ping_worker():
                 print(f"🔄 [ANTI-SLEEP PING] Successfully pinged {url} (Status: {r.status_code})")
             except Exception as e:
                 print(f"⚠️ [ANTI-SLEEP PING] Ping error: {e}")
-        time.sleep(480) # Ping every 8 minutes (Render sleeps at 15 mins)
+        time.sleep(480)
 
 class MomentumHunterBot:
     def __init__(self):
@@ -78,6 +78,9 @@ class MomentumHunterBot:
         
         self.client = DeltaClient()
         self.strategy = MomentumStrategy()
+        
+        # Register bot with telegram helper for /status, /positions, /balance
+        telegram_helper.register_bot(self)
         
         mode_str = "📝 PAPER TRADING (Safe Simulation)" if config.PAPER_TRADING else "🔴 LIVE REAL MONEY"
         print("=" * 68)
@@ -97,7 +100,8 @@ class MomentumHunterBot:
             f"• *Position Size:* ₹{config.POSITION_NOTIONAL_INR:,.0f} (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)\n"
             f"• *Max Positions:* {config.MAX_CONCURRENT_POSITIONS}\n"
             f"• *Anti-Sleep Shield:* Active 24/7 (Port {PORT})\n"
-            f"• *Pairs Monitored:* Top {len(self.client.products)} Volume Perps"
+            f"• *Pairs Monitored:* Top {len(self.client.products)} Volume Perps\n\n"
+            f"💡 *Reply Enabled:* Send `/status`, `/positions`, or `/balance` anytime to check live updates!"
         )
         telegram_helper.send_alert(startup_msg)
 
@@ -296,13 +300,17 @@ class MomentumHunterBot:
             time.sleep(config.SCAN_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    # Start Embedded HTTP Server for Render Keep-Alive
+    # Start Keep-Alive Server on PORT (Port 10000 on Render)
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
     
-    # Start Self-Ping Thread to prevent Render Free Tier Sleep
+    # Start Self-Ping Thread to avoid Render Free Tier 15-min idle sleep
     ping_thread = threading.Thread(target=self_ping_worker, daemon=True)
     ping_thread.start()
+    
+    # Start Interactive Telegram Command Listener (/status, /positions, /balance)
+    tg_thread = threading.Thread(target=telegram_helper.handle_telegram_commands, daemon=True)
+    tg_thread.start()
     
     bot = MomentumHunterBot()
     try:
