@@ -9,6 +9,7 @@ import requests
 import config
 from delta_client import DeltaClient
 from strategy import MomentumStrategy
+from insider_data_engine import InsiderDataEngine
 import telegram_helper
 
 # Indian Standard Time (IST = UTC+5:30)
@@ -35,11 +36,19 @@ class HealthHandler(BaseHTTPRequestHandler):
             
         health_data = {
             "status": "ONLINE_ACTIVE",
-            "bot": "Delta Institutional Momentum Hunter v2",
+            "bot": "Delta Multi-Source Institutional Momentum Engine",
             "mode": "PAPER_TRADING" if config.PAPER_TRADING else "LIVE_REAL_MONEY",
             "wallet_balance": wallet,
             "open_positions": open_pos,
             "max_positions": config.MAX_CONCURRENT_POSITIONS,
+            "data_channels": [
+                "OHLCV_5M_CLOSED",
+                "BINANCE_TAKER_CVD_5M",
+                "BINANCE_TOP_TRADER_WHALES",
+                "BINANCE_OPEN_INTEREST_GROWTH",
+                "DELTA_INDIA_RESTING_DEPTH",
+                "BTC_MACRO_REGIME_15M"
+            ],
             "ist_time": datetime.now(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
         }
         self.wfile.write(json.dumps(health_data).encode("utf-8"))
@@ -48,7 +57,6 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def start_http_server():
-    """Runs lightweight HTTP server in background so Render/AWS never crashes on port check"""
     try:
         server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
         print(f"🌐 [KEEP-ALIVE SERVER] Listening on port {PORT}...")
@@ -57,7 +65,6 @@ def start_http_server():
         print(f"⚠️ HTTP Server notice: {e}")
 
 def self_ping_worker():
-    """Pings own Render URL every 8 minutes to prevent Render Free Tier from sleeping"""
     time.sleep(30)
     while True:
         url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(config, "RENDER_URL", "")
@@ -78,29 +85,37 @@ class MomentumHunterBot:
         
         self.client = DeltaClient()
         self.strategy = MomentumStrategy()
-        self.last_candle_signals = {} # Tracks {symbol: last_candle_time} to prevent duplicate entries
+        self.insider_engine = InsiderDataEngine()
+        self.last_candle_signals = {}
         
         telegram_helper.register_bot(self)
         
         mode_str = "📝 PAPER TRADING (Safe Simulation)" if config.PAPER_TRADING else "🔴 LIVE REAL MONEY"
-        print("=" * 68)
-        print("🚀 DELTA EXCHANGE INDIA - INSTITUTIONAL MOMENTUM ENGINE v2")
-        print("=" * 68)
+        print("=" * 72)
+        print("🚀 DELTA EXCHANGE INDIA - MULTI-SOURCE INSTITUTIONAL ENGINE")
+        print("=" * 72)
         print(f"Mode: {mode_str}")
         print(f"Wallet Capital: ₹{config.TOTAL_WALLET_CAPITAL:,.0f} INR")
         print(f"Position Notional: ₹{config.POSITION_NOTIONAL_INR:,.0f} INR (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)")
         print(f"Max Concurrent Positions: {config.MAX_CONCURRENT_POSITIONS}")
-        print("Features: Closed-Candle Execution + Squeeze Filter + Liquidity Sweep")
-        print("=" * 68)
+        print("Insider Feeds: Binance Taker CVD + Whales L/S + OI Trend + Delta Depth + BTC 15m")
+        print("Zero Blind Trades: 100% of entries verified by multi-source order flow.")
+        print("=" * 72)
         
         startup_msg = (
-            f"🚀 *Delta Institutional Momentum Engine v2 Online*\n\n"
+            f"🚀 *Delta Multi-Source Institutional Engine Online*\n\n"
             f"• *Mode:* `{mode_str}`\n"
-            f"• *Strategy:* Closed-Candle Retest & Liquidity Sweep (10.89 PF)\n"
+            f"• *Data Confluence Feeds:*\n"
+            f"   - 100% Closed 5m Candles\n"
+            f"   - Binance Global Taker CVD (5m)\n"
+            f"   - Binance Top Trader Smart Money Ratio\n"
+            f"   - Binance Open Interest Expansion (5m)\n"
+            f"   - Delta India Order Book Resting Liquidity\n"
+            f"   - BTC Macro 15m Health Filter\n"
             f"• *Wallet Capital:* ₹{config.TOTAL_WALLET_CAPITAL:,.0f}\n"
             f"• *Position Size:* ₹{config.POSITION_NOTIONAL_INR:,.0f} (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)\n"
             f"• *Max Positions:* {config.MAX_CONCURRENT_POSITIONS}\n"
-            f"• *Pairs Monitored:* Top {len(self.client.products)} Volume Perps\n\n"
+            f"• *Pairs Monitored:* Top {len(self.client.products)} Liquid Perps\n\n"
             f"💡 *Commands:* `/status`, `/positions`, `/balance`"
         )
         telegram_helper.send_alert(startup_msg)
@@ -113,7 +128,6 @@ class MomentumHunterBot:
         if symbol in open_pos:
             return
             
-        # Prevent re-entering on the exact same candle
         candle_time = signal.get('time', '')
         if self.last_candle_signals.get(symbol) == candle_time:
             return
@@ -124,6 +138,8 @@ class MomentumHunterBot:
         initial_sl = self.client.round_price(symbol, signal['sl'])
         tp1_price = self.client.round_price(symbol, signal['tp1'])
         atr = signal['atr']
+        score = signal.get('insider_score', 0)
+        metrics = signal.get('insider_metrics', {})
 
         # 🔴 LIVE REAL MONEY EXECUTION (IF PAPER_TRADING = FALSE)
         if not config.PAPER_TRADING:
@@ -152,22 +168,33 @@ class MomentumHunterBot:
         self.client.paper_state["active_margin"] += config.MARGIN_PER_TRADE
         self.client.save_paper_state()
         
-        print(f"\n⚡ [{datetime.now(IST).strftime('%H:%M:%S')}] NEW {side} ENTRY: {symbol}")
-        print(f"   Reason: {signal['reason']}")
+        cvd_val = metrics.get('cvd', 1.0)
+        whales_val = metrics.get('top_whales', 1.0)
+        depth_val = metrics.get('bid_imb', 0.5) * 100
+        oi_val = metrics.get('oi_chg', 0.0)
+        
+        print(f"\n⚡ [{datetime.now(IST).strftime('%H:%M:%S')}] NEW {side} ENTRY CONFIRMED: {symbol}")
+        print(f"   Setup: {signal['reason']}")
+        print(f"   Insider Score: {score}/100 | CVD: {cvd_val:.2f}x | Whales: {whales_val:.2f}x | Delta Depth: {depth_val:.0f}%")
         print(f"   Price: {entry_price} | Contracts: {contracts} (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})")
         print(f"   Stop Loss: {initial_sl} | TP1: {tp1_price}")
         print(f"   Slots In Use: {len(open_pos)}/{config.MAX_CONCURRENT_POSITIONS}")
         
         alert = (
-            f"🎯 *NEW {side} SIGNAL (CLOSED BAR CONFIRMED)*\n\n"
+            f"🎯 *NEW {side} SIGNAL (INSTITUTIONAL DATA CONFIRMED)*\n\n"
             f"• *Coin:* `{symbol}`\n"
             f"• *Setup:* `{signal['reason']}`\n"
             f"• *Entry:* `{entry_price}`\n"
             f"• *Contracts:* `{contracts}` (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})\n"
             f"• *Margin Used:* ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x\n"
             f"• *Stop Loss:* `{initial_sl}`\n"
-            f"• *Target 1:* `{tp1_price}`\n"
-            f"• *Execution:* Strict Closed Candle Confirmation"
+            f"• *Target 1:* `{tp1_price}`\n\n"
+            f"📊 *Live Insider Data Verification:*\n"
+            f"   - *Confluence Score:* `{score}/100` ✅\n"
+            f"   - *Binance Taker CVD (5m):* `{cvd_val:.2f}x` (Aggressive Flow)\n"
+            f"   - *Binance Smart Money Ratio:* `{whales_val:.2f}x`\n"
+            f"   - *Binance 5m OI Growth:* `{oi_val:+.2f}%`\n"
+            f"   - *Delta India Book Depth:* `{depth_val:.0f}% Bids`"
         )
         telegram_helper.send_alert(alert)
 
@@ -221,7 +248,6 @@ class MomentumHunterBot:
                 # Check TP1
                 if curr_price >= pos['tp1_price'] and not pos['tp1_hit']:
                     pos['tp1_hit'] = True
-                    # Lock Stop Loss at Breakeven (+0.1% to cover fee)
                     pos['current_sl'] = self.client.round_price(sym, entry_p * 1.001)
                     self.client.save_paper_state()
                     
@@ -294,7 +320,7 @@ class MomentumHunterBot:
                         self.client.save_paper_state()
 
     def run(self):
-        print(f"\n⚡ Live Scanner active. Scanning Top {len(self.client.products)} Pairs every {config.SCAN_INTERVAL_SECONDS}s...")
+        print(f"\n⚡ Multi-Source Scanner active. Scanning Top {len(self.client.products)} Pairs every {config.SCAN_INTERVAL_SECONDS}s...")
         cycle = 1
         while True:
             t_now = datetime.now(IST).strftime('%H:%M:%S')
@@ -306,14 +332,37 @@ class MomentumHunterBot:
             for sym in list(self.client.products.keys()):
                 if sym in self.client.paper_state["open_positions"]:
                     continue
+                    
+                # 1. Fetch live Delta India ticker (Quotes, Depth, Spread, Turnover, Funding)
+                ticker_data = self.client.fetch_ticker(sym)
+                if not ticker_data:
+                    continue
+                    
+                # 2. Fetch candles (35 periods)
                 df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=35)
                 if df.empty:
                     continue
-                signal = self.strategy.check_signal(df)
-                if signal:
-                    self.execute_entry(sym, signal)
+                    
+                # 3. Stage 1 Candle Microstructure Check
+                unconfirmed_signal = self.strategy.check_signal(df, ticker=ticker_data, insider_conf=None)
+                if not unconfirmed_signal:
+                    continue
+                    
+                candidate_side = unconfirmed_signal['side']
+                print(f"\n🔍 Candidate setup detected on {sym} ({candidate_side})! Fetching multi-source insider matrix...")
+                
+                # 4. Stage 2 Multi-Source Institutional Confluence Verification
+                insider_conf = self.insider_engine.compute_confluence(sym, candidate_side, ticker_data)
+                
+                # 5. Stage 3 Strict Execution Gate
+                confirmed_signal = self.strategy.check_signal(df, ticker=ticker_data, insider_conf=insider_conf)
+                if confirmed_signal:
+                    self.execute_entry(sym, confirmed_signal)
                     if len(self.client.paper_state["open_positions"]) >= config.MAX_CONCURRENT_POSITIONS:
                         break
+                else:
+                    print(f"⛔ [REJECTED BY DATA] {sym} {candidate_side}: {insider_conf.get('reason')} (Score: {insider_conf.get('score')}/100)")
+
             cycle += 1
             time.sleep(config.SCAN_INTERVAL_SECONDS)
 

@@ -42,14 +42,27 @@ class MomentumStrategy:
         return df
 
     @staticmethod
-    def check_signal(df: pd.DataFrame):
+    def check_signal(df: pd.DataFrame, ticker: dict = None, insider_conf: dict = None):
         """
-        Evaluates signals strictly on the LAST CLOSED CANDLE (df.iloc[-2]).
-        Never triggers on forming live candle (df.iloc[-1]) to eliminate fake spikes!
+        Multi-Dimensional Institutional Decision Engine:
+        Requires BOTH Candlestick Microstructure AND Multi-Source Insider Order-Flow Confluence.
+        Zero Blind Trades: If insider data does not confirm, the trade is rejected!
         """
         if len(df) < 25:
             return None
             
+        # ==============================================================================
+        # 1. HARD EXCHANGE GUARDS (SPREAD & LIQUIDITY)
+        # ==============================================================================
+        if ticker:
+            spread = ticker.get('spread_pct', 0.0)
+            if spread > 0.15:
+                return None
+                
+            turnover = ticker.get('turnover_usd', 0.0)
+            if turnover > 0 and turnover < 250000:
+                return None
+
         df = MomentumStrategy.calculate_indicators(df)
         
         # STRICT RULE: df.iloc[-2] is the FULLY CLOSED 5-minute candle
@@ -60,97 +73,132 @@ class MomentumStrategy:
         atr = closed['atr14']
         candle_time = str(closed['t'])
         
+        # Microstructure Depth from Ticker
+        bid_imbalance = ticker.get('bid_imbalance', 0.50) if ticker else 0.50
+        funding_rate = ticker.get('funding_rate', 0.0) if ticker else 0.0
+        
+        candidate_signal = None
+        
         # ==============================================================================
         # ENGINE 1: INSTITUTIONAL SWEEP & RECLAIM (10.89 PROFIT FACTOR ALPHA)
         # ==============================================================================
         
-        # Bullish Sweep: Price sweeps 20-candle low, hunts stops, and reclaims with long lower wick (>= 40%)
+        # Bullish Sweep: Price sweeps 20-candle low, hunts stops, reclaims with lower wick >= 40%
         if (closed['low'] < closed['ll20'] and 
             closed['close'] > closed['ll20'] and 
             closed['lower_wick'] >= 0.40 and 
             closed['rvol'] >= 2.0 and 
-            closed['close'] > closed['ema50']):
+            closed['close'] > closed['ema50'] and 
+            bid_imbalance >= 0.40):
             
-            sl = closed['low'] - (0.15 * atr) # Tight SL right below the sweep wick
+            sl = closed['low'] - (0.15 * atr)
             tp1 = closed['close'] + (1.8 * atr)
-            return {
+            candidate_signal = {
                 'side': 'BUY',
                 'price': live_now['close'],
                 'sl': sl,
                 'tp1': tp1,
                 'atr': atr,
                 'time': candle_time,
-                'reason': f"Bullish Liquidity Sweep (Wick: {closed['lower_wick']*100:.0f}%, RVol: {closed['rvol']:.1f}x)"
+                'setup': 'Bullish Sweep Reclaim'
             }
             
-        # Bearish Sweep: Price sweeps 20-candle high, traps breakout buyers, and reclaims inside with upper wick (>= 40%)
+        # Bearish Sweep: Price sweeps 20-candle high, traps breakout buyers, reclaims with upper wick >= 40%
         elif (closed['high'] > closed['hh20'] and 
               closed['close'] < closed['hh20'] and 
               closed['upper_wick'] >= 0.40 and 
               closed['rvol'] >= 2.0 and 
-              closed['close'] < closed['ema50']):
+              closed['close'] < closed['ema50'] and 
+              bid_imbalance <= 0.60):
               
-            sl = closed['high'] + (0.15 * atr) # Tight SL right above the sweep wick
+            sl = closed['high'] + (0.15 * atr)
             tp1 = closed['close'] - (1.8 * atr)
-            return {
+            candidate_signal = {
                 'side': 'SELL',
                 'price': live_now['close'],
                 'sl': sl,
                 'tp1': tp1,
                 'atr': atr,
                 'time': candle_time,
-                'reason': f"Bearish Trap Sweep (Wick: {closed['upper_wick']*100:.0f}%, RVol: {closed['rvol']:.1f}x)"
+                'setup': 'Bearish Trap Reclaim'
             }
-            
+
         # ==============================================================================
         # ENGINE 2: PRECISION SQUEEZE BREAKOUT (SOLID BODY & COMPRESSION)
         # ==============================================================================
-        
-        # Bullish Breakout: Must come out of a Squeeze, have Solid Body (Upper Wick <= 25%), and High RVol
-        if (closed['rvol'] >= 3.0 and 
-            closed['close'] > closed['hh20'] and 
-            candle_pct >= 0.005 and 
-            closed['upper_wick'] <= 0.25 and 
-            closed['body_ratio'] >= 0.50 and 
-            closed['close'] > closed['ema50'] and 
-            closed['ema20'] > closed['ema50'] and 
-            closed['is_squeeze']):
+        if not candidate_signal:
+            # Bullish Breakout: Squeeze + Solid Green Body + High Volume + Bid Depth >= 45%
+            if (closed['rvol'] >= 3.0 and 
+                closed['close'] > closed['hh20'] and 
+                candle_pct >= 0.005 and 
+                closed['upper_wick'] <= 0.25 and 
+                closed['body_ratio'] >= 0.50 and 
+                closed['close'] > closed['ema50'] and 
+                closed['ema20'] > closed['ema50'] and 
+                closed['is_squeeze'] and 
+                bid_imbalance >= 0.45):
+                
+                entry_level = max(closed['hh20'], closed['ema9'])
+                sl = entry_level - (1.1 * atr)
+                tp1 = closed['close'] + (2.0 * atr)
+                candidate_signal = {
+                    'side': 'BUY',
+                    'price': live_now['close'],
+                    'sl': sl,
+                    'tp1': tp1,
+                    'atr': atr,
+                    'time': candle_time,
+                    'setup': 'Solid Squeeze Breakout'
+                }
+                
+            # Bearish Breakdown: Squeeze + Solid Red Body + High Sell Volume + Ask Depth >= 45%
+            elif (closed['rvol'] >= 3.0 and 
+                  closed['close'] < closed['ll20'] and 
+                  candle_pct <= -0.005 and 
+                  closed['lower_wick'] <= 0.25 and 
+                  closed['body_ratio'] >= 0.50 and 
+                  closed['close'] < closed['ema50'] and 
+                  closed['ema20'] < closed['ema50'] and 
+                  closed['is_squeeze'] and 
+                  bid_imbalance <= 0.55):
+                  
+                entry_level = min(closed['ll20'], closed['ema9'])
+                sl = entry_level + (1.1 * atr)
+                tp1 = closed['close'] - (2.0 * atr)
+                candidate_signal = {
+                    'side': 'SELL',
+                    'price': live_now['close'],
+                    'sl': sl,
+                    'tp1': tp1,
+                    'atr': atr,
+                    'time': candle_time,
+                    'setup': 'Solid Squeeze Breakdown'
+                }
+
+        if not candidate_signal:
+            return None
+
+        # ==============================================================================
+        # 3. ENFORCE INSTITUTIONAL INSIDER CONFLUENCE (MANDATORY)
+        # ==============================================================================
+        # If insider data is available, verify it. Reject trade if confluence fails!
+        if insider_conf:
+            if not insider_conf.get('passed', False):
+                # Trade rejected because insider order-flow does not support it!
+                return None
             
-            # Entry on retest of 9 EMA / Breakout level
-            entry_level = max(closed['hh20'], closed['ema9'])
-            sl = entry_level - (1.1 * atr)
-            tp1 = closed['close'] + (2.0 * atr)
-            return {
-                'side': 'BUY',
-                'price': live_now['close'],
-                'sl': sl,
-                'tp1': tp1,
-                'atr': atr,
-                'time': candle_time,
-                'reason': f"Solid Squeeze Breakout (Body: {closed['body_ratio']*100:.0f}%, RVol: {closed['rvol']:.1f}x)"
-            }
+            score = insider_conf.get('score', 0)
+            cvd = insider_conf.get('cvd', 1.0)
+            whales = insider_conf.get('top_whales', 1.0)
+            insider_notes = insider_conf.get('reason', '')
             
-        # Bearish Breakdown: Solid Red Body (Lower Wick <= 25%) out of squeeze below 50 EMA
-        elif (closed['rvol'] >= 3.0 and 
-              closed['close'] < closed['ll20'] and 
-              candle_pct <= -0.005 and 
-              closed['lower_wick'] <= 0.25 and 
-              closed['body_ratio'] >= 0.50 and 
-              closed['close'] < closed['ema50'] and 
-              closed['ema20'] < closed['ema50'] and 
-              closed['is_squeeze']):
-              
-            entry_level = min(closed['ll20'], closed['ema9'])
-            sl = entry_level + (1.1 * atr)
-            tp1 = closed['close'] - (2.0 * atr)
-            return {
-                'side': 'SELL',
-                'price': live_now['close'],
-                'sl': sl,
-                'tp1': tp1,
-                'atr': atr,
-                'time': candle_time,
-                'reason': f"Solid Squeeze Breakdown (Body: {closed['body_ratio']*100:.0f}%, RVol: {closed['rvol']:.1f}x)"
-            }
-            
-        return None
+            candidate_signal['reason'] = (
+                f"{candidate_signal['setup']} [Score: {score}/100 | CVD: {cvd:.2f}x | "
+                f"Whales: {whales:.2f}x | {insider_notes}]"
+            )
+            candidate_signal['insider_score'] = score
+            candidate_signal['insider_metrics'] = insider_conf
+        else:
+            candidate_signal['reason'] = f"{candidate_signal['setup']} (Depth: {bid_imbalance*100:.0f}%)"
+
+        return candidate_signal

@@ -54,6 +54,7 @@ class DeltaClient:
                     for t in r_tickers['result']:
                         vol_map[t.get('symbol')] = float(t.get('turnover_usd') or 0)
                 
+                # Sort strictly by real 24h turnover so we only trade active institutional coins
                 sorted_perps = sorted(live_perps, key=lambda x: vol_map.get(x['symbol'], 0), reverse=True)[:limit]
                 for p in sorted_perps:
                     sym = p['symbol']
@@ -114,19 +115,52 @@ class DeltaClient:
             pass
         return pd.DataFrame()
 
-    def get_mark_price(self, symbol: str) -> float:
+    def fetch_ticker(self, symbol: str) -> dict:
+        """
+        Fetches full live ticker data from Delta India:
+        Order Book Depth (Quotes), Spread, 24h Turnover, Open Interest, Funding Rate
+        """
         try:
             r = requests.get(f"{self.base_url}/v2/tickers/{symbol}", headers=self.headers, timeout=4).json()
-            return float(r['result']['mark_price'])
+            if 'result' in r:
+                res = r['result']
+                quotes = res.get('quotes', {})
+                best_bid = float(quotes.get('best_bid') or 0)
+                best_ask = float(quotes.get('best_ask') or 0)
+                bid_size = float(quotes.get('bid_size') or 0)
+                ask_size = float(quotes.get('ask_size') or 0)
+                
+                spread_pct = ((best_ask - best_bid) / best_bid * 100) if best_bid > 0 else 999.0
+                total_depth = bid_size + ask_size
+                bid_imbalance = (bid_size / total_depth) if total_depth > 0 else 0.50
+                
+                return {
+                    'symbol': symbol,
+                    'mark_price': float(res.get('mark_price') or 0),
+                    'spot_price': float(res.get('spot_price') or 0),
+                    'turnover_usd': float(res.get('turnover_usd') or 0),
+                    'oi_value_usd': float(res.get('oi_value_usd') or 0),
+                    'funding_rate': float(res.get('funding_rate') or 0),
+                    'best_bid': best_bid,
+                    'best_ask': best_ask,
+                    'bid_size': bid_size,
+                    'ask_size': ask_size,
+                    'spread_pct': spread_pct,
+                    'bid_imbalance': bid_imbalance
+                }
         except Exception:
-            return 0.0
+            pass
+        return {}
+
+    def get_mark_price(self, symbol: str) -> float:
+        t = self.fetch_ticker(symbol)
+        return t.get('mark_price', 0.0)
 
     # ==============================================================================
     # 🔴 REAL MONEY TRADING (DELTA EXCHANGE INDIA AUTHENTICATED API)
     # ==============================================================================
 
     def _auth_request(self, method: str, path: str, payload_dict: dict = None):
-        """Sends authenticated request to Delta Exchange India using HMAC SHA256"""
         timestamp = str(int(time.time()))
         body = json.dumps(payload_dict) if payload_dict else ""
         
@@ -159,7 +193,6 @@ class DeltaClient:
             return None
 
     def get_real_wallet_balance(self) -> float:
-        """Fetches real INR / USD available balance on Delta India"""
         if config.PAPER_TRADING:
             return self.paper_state.get("wallet_balance", config.TOTAL_WALLET_CAPITAL)
         res = self._auth_request("GET", "/v2/wallet/balances")
@@ -170,10 +203,8 @@ class DeltaClient:
         return 0.0
 
     def execute_real_order(self, symbol: str, side: str, size: int, sl_price: float, tp1_price: float):
-        """Places live market order with attached bracket stop-loss and take-profit on Delta India"""
         spec = self.products.get(symbol)
         if not spec:
-            print(f"❌ Cannot place real order: {symbol} spec missing.")
             return None
 
         payload = {
@@ -204,12 +235,10 @@ class DeltaClient:
             return None
 
     def close_real_position(self, symbol: str, side: str, size: int):
-        """Closes live open position with a market order"""
         spec = self.products.get(symbol)
         if not spec:
             return None
 
-        # To close a BUY, we SELL; to close a SELL, we BUY
         close_side = "sell" if side.upper() in ["BUY", "LONG"] else "buy"
         payload = {
             "product_id": spec['id'],
