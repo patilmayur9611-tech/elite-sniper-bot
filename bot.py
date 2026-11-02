@@ -31,11 +31,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         wallet = config.TOTAL_WALLET_CAPITAL
         if bot_instance and hasattr(bot_instance, 'client'):
             open_pos = len(bot_instance.client.paper_state.get("open_positions", {}))
-            wallet = bot_instance.client.paper_state.get("wallet_balance", config.TOTAL_WALLET_CAPITAL)
+            wallet = bot_instance.client.get_real_wallet_balance() if not config.PAPER_TRADING else bot_instance.client.paper_state.get("wallet_balance", config.TOTAL_WALLET_CAPITAL)
             
         health_data = {
             "status": "ONLINE_ACTIVE",
-            "bot": "Delta Early Momentum Hunter",
+            "bot": "Delta Institutional Momentum Hunter v2",
             "mode": "PAPER_TRADING" if config.PAPER_TRADING else "LIVE_REAL_MONEY",
             "wallet_balance": wallet,
             "open_positions": open_pos,
@@ -45,19 +45,19 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(health_data).encode("utf-8"))
 
     def log_message(self, format, *args):
-        pass  # Suppress health check spam in console/Render logs
+        pass
 
 def start_http_server():
-    """Runs lightweight HTTP server in background so Render never sleeps or crashes on port check"""
+    """Runs lightweight HTTP server in background so Render/AWS never crashes on port check"""
     try:
         server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-        print(f"🌐 [ANTI-SLEEP SERVER] Listening on port {PORT} for 24/7 Keep-Alive...")
+        print(f"🌐 [KEEP-ALIVE SERVER] Listening on port {PORT}...")
         server.serve_forever()
     except Exception as e:
         print(f"⚠️ HTTP Server notice: {e}")
 
 def self_ping_worker():
-    """Pings own Render URL every 8 minutes to prevent Render Free Tier from sleeping (15-min idle timeout)"""
+    """Pings own Render URL every 8 minutes to prevent Render Free Tier from sleeping"""
     time.sleep(30)
     while True:
         url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(config, "RENDER_URL", "")
@@ -66,9 +66,9 @@ def self_ping_worker():
                 url = f"https://{url}"
             try:
                 r = requests.get(f"{url}/", timeout=10)
-                print(f"🔄 [ANTI-SLEEP PING] Successfully pinged {url} (Status: {r.status_code})")
+                print(f"🔄 [KEEP-ALIVE PING] Pinged {url} (Status: {r.status_code})")
             except Exception as e:
-                print(f"⚠️ [ANTI-SLEEP PING] Ping error: {e}")
+                pass
         time.sleep(480)
 
 class MomentumHunterBot:
@@ -78,30 +78,30 @@ class MomentumHunterBot:
         
         self.client = DeltaClient()
         self.strategy = MomentumStrategy()
+        self.last_candle_signals = {} # Tracks {symbol: last_candle_time} to prevent duplicate entries
         
-        # Register bot with telegram helper for /status, /positions, /balance
         telegram_helper.register_bot(self)
         
         mode_str = "📝 PAPER TRADING (Safe Simulation)" if config.PAPER_TRADING else "🔴 LIVE REAL MONEY"
         print("=" * 68)
-        print("🚀 DELTA EXCHANGE INDIA - EARLY MOMENTUM HUNTER")
+        print("🚀 DELTA EXCHANGE INDIA - INSTITUTIONAL MOMENTUM ENGINE v2")
         print("=" * 68)
         print(f"Mode: {mode_str}")
         print(f"Wallet Capital: ₹{config.TOTAL_WALLET_CAPITAL:,.0f} INR")
         print(f"Position Notional: ₹{config.POSITION_NOTIONAL_INR:,.0f} INR (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)")
         print(f"Max Concurrent Positions: {config.MAX_CONCURRENT_POSITIONS}")
+        print("Features: Closed-Candle Execution + Squeeze Filter + Liquidity Sweep")
         print("=" * 68)
         
-        # Send Telegram Bot Online Notification
         startup_msg = (
-            f"🚀 *Delta Early Momentum Hunter Online*\n\n"
+            f"🚀 *Delta Institutional Momentum Engine v2 Online*\n\n"
             f"• *Mode:* `{mode_str}`\n"
+            f"• *Strategy:* Closed-Candle Retest & Liquidity Sweep (10.89 PF)\n"
             f"• *Wallet Capital:* ₹{config.TOTAL_WALLET_CAPITAL:,.0f}\n"
             f"• *Position Size:* ₹{config.POSITION_NOTIONAL_INR:,.0f} (Margin: ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x)\n"
             f"• *Max Positions:* {config.MAX_CONCURRENT_POSITIONS}\n"
-            f"• *Anti-Sleep Shield:* Active 24/7 (Port {PORT})\n"
             f"• *Pairs Monitored:* Top {len(self.client.products)} Volume Perps\n\n"
-            f"💡 *Reply Enabled:* Send `/status`, `/positions`, or `/balance` anytime to check live updates!"
+            f"💡 *Commands:* `/status`, `/positions`, `/balance`"
         )
         telegram_helper.send_alert(startup_msg)
 
@@ -113,18 +113,25 @@ class MomentumHunterBot:
         if symbol in open_pos:
             return
             
+        # Prevent re-entering on the exact same candle
+        candle_time = signal.get('time', '')
+        if self.last_candle_signals.get(symbol) == candle_time:
+            return
+            
         side = signal['side']
         entry_price = self.client.round_price(symbol, signal['price'])
         contracts = self.client.calculate_contracts(symbol, entry_price)
+        initial_sl = self.client.round_price(symbol, signal['sl'])
+        tp1_price = self.client.round_price(symbol, signal['tp1'])
         atr = signal['atr']
-        
-        if side == 'BUY':
-            initial_sl = self.client.round_price(symbol, entry_price - (1.3 * atr))
-            tp1_price = self.client.round_price(symbol, entry_price * 1.035) # +3.5%
-        else: # SHORT
-            initial_sl = self.client.round_price(symbol, entry_price + (1.1 * atr))
-            tp1_price = self.client.round_price(symbol, entry_price * 0.965) # -3.5%
-            
+
+        # 🔴 LIVE REAL MONEY EXECUTION (IF PAPER_TRADING = FALSE)
+        if not config.PAPER_TRADING:
+            real_res = self.client.execute_real_order(symbol, side, contracts, initial_sl, tp1_price)
+            if not real_res:
+                print(f"❌ Real order submission failed for {symbol}. Will not track.")
+                return
+
         pos_data = {
             'symbol': symbol,
             'side': side,
@@ -136,27 +143,31 @@ class MomentumHunterBot:
             'tp1_hit': False,
             'peak_price': entry_price,
             'entry_time': datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST'),
-            'atr': atr
+            'atr': atr,
+            'reason': signal['reason']
         }
         
+        self.last_candle_signals[symbol] = candle_time
         open_pos[symbol] = pos_data
         self.client.paper_state["active_margin"] += config.MARGIN_PER_TRADE
         self.client.save_paper_state()
         
         print(f"\n⚡ [{datetime.now(IST).strftime('%H:%M:%S')}] NEW {side} ENTRY: {symbol}")
+        print(f"   Reason: {signal['reason']}")
         print(f"   Price: {entry_price} | Contracts: {contracts} (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})")
-        print(f"   Stop Loss: {initial_sl} | TP1 (+3.5%): {tp1_price}")
+        print(f"   Stop Loss: {initial_sl} | TP1: {tp1_price}")
         print(f"   Slots In Use: {len(open_pos)}/{config.MAX_CONCURRENT_POSITIONS}")
         
         alert = (
-            f"🎯 *NEW {side} SIGNAL*\n\n"
+            f"🎯 *NEW {side} SIGNAL (CLOSED BAR CONFIRMED)*\n\n"
             f"• *Coin:* `{symbol}`\n"
+            f"• *Setup:* `{signal['reason']}`\n"
             f"• *Entry:* `{entry_price}`\n"
             f"• *Contracts:* `{contracts}` (Value: ₹{config.POSITION_NOTIONAL_INR:,.0f})\n"
             f"• *Margin Used:* ₹{config.MARGIN_PER_TRADE:,.0f} @ {config.LEVERAGE}x\n"
-            f"• *Stop Loss:* `{initial_sl}` (~-1.0%)\n"
-            f"• *Target 1:* `{tp1_price}` (+3.5%)\n"
-            f"• *Signal:* {signal['reason']}"
+            f"• *Stop Loss:* `{initial_sl}`\n"
+            f"• *Target 1:* `{tp1_price}`\n"
+            f"• *Execution:* Strict Closed Candle Confirmation"
         )
         telegram_helper.send_alert(alert)
 
@@ -185,6 +196,9 @@ class MomentumHunterBot:
                     pnl_pct = (exit_p - entry_p) / entry_p
                     pnl_inr = config.POSITION_NOTIONAL_INR * pnl_pct
                     
+                    if not config.PAPER_TRADING:
+                        self.client.close_real_position(sym, side, pos['contracts'])
+
                     print(f"\n🛑 [STOP LOSS HIT] {sym} (LONG) at {exit_p} | PnL: {pnl_pct*100:+.2f}% (₹{pnl_inr:+.1f} INR)")
                     
                     self.client.paper_state["wallet_balance"] += pnl_inr
@@ -204,15 +218,16 @@ class MomentumHunterBot:
                     )
                     continue
                     
-                # Check TP1 (+3.5%)
+                # Check TP1
                 if curr_price >= pos['tp1_price'] and not pos['tp1_hit']:
                     pos['tp1_hit'] = True
+                    # Lock Stop Loss at Breakeven (+0.1% to cover fee)
                     pos['current_sl'] = self.client.round_price(sym, entry_p * 1.001)
                     self.client.save_paper_state()
                     
-                    print(f"\n🎉 [TP1 HIT] {sym} reached +3.5%! SL moved to BREAKEVEN ({pos['current_sl']}). Free slot opened!")
+                    print(f"\n🎉 [TP1 HIT] {sym} reached target! SL moved to BREAKEVEN ({pos['current_sl']}). Free slot opened!")
                     telegram_helper.send_alert(
-                        f"🎉 *TP1 HIT (+3.5%) — {sym}*\n\n"
+                        f"🎉 *TP1 HIT — {sym}*\n\n"
                         f"• 30% Profit Booked!\n"
                         f"• Stop Loss moved to *BREAKEVEN* (`{pos['current_sl']}`)\n"
                         f"• Trade is now *100% Risk-Free*!\n"
@@ -221,7 +236,7 @@ class MomentumHunterBot:
                     
                 # Trailing Stop for Runner
                 if pos['tp1_hit']:
-                    trail = self.client.round_price(sym, pos['peak_price'] - (1.4 * atr))
+                    trail = self.client.round_price(sym, pos['peak_price'] - (1.3 * atr))
                     if trail > pos['current_sl']:
                         pos['current_sl'] = trail
                         self.client.save_paper_state()
@@ -235,6 +250,9 @@ class MomentumHunterBot:
                     pnl_pct = (entry_p - exit_p) / entry_p
                     pnl_inr = config.POSITION_NOTIONAL_INR * pnl_pct
                     
+                    if not config.PAPER_TRADING:
+                        self.client.close_real_position(sym, side, pos['contracts'])
+
                     print(f"\n🛑 [STOP LOSS HIT] {sym} (SHORT) at {exit_p} | PnL: {pnl_pct*100:+.2f}% (₹{pnl_inr:+.1f} INR)")
                     
                     self.client.paper_state["wallet_balance"] += pnl_inr
@@ -254,15 +272,15 @@ class MomentumHunterBot:
                     )
                     continue
                     
-                # Check TP1 (-3.5%)
+                # Check TP1
                 if curr_price <= pos['tp1_price'] and not pos['tp1_hit']:
                     pos['tp1_hit'] = True
                     pos['current_sl'] = self.client.round_price(sym, entry_p * 0.999)
                     self.client.save_paper_state()
                     
-                    print(f"\n🎉 [TP1 HIT] {sym} (SHORT) reached +3.5%! SL moved to BREAKEVEN ({pos['current_sl']}).")
+                    print(f"\n🎉 [TP1 HIT] {sym} (SHORT) reached target! SL moved to BREAKEVEN ({pos['current_sl']}).")
                     telegram_helper.send_alert(
-                        f"🎉 *TP1 HIT (SHORT +3.5%) — {sym}*\n\n"
+                        f"🎉 *TP1 HIT (SHORT) — {sym}*\n\n"
                         f"• Stop Loss moved to *BREAKEVEN* (`{pos['current_sl']}`)\n"
                         f"• Trade is now *100% Risk-Free*!\n"
                         f"• 70% Runner riding with Trailing Stop."
@@ -288,7 +306,7 @@ class MomentumHunterBot:
             for sym in list(self.client.products.keys()):
                 if sym in self.client.paper_state["open_positions"]:
                     continue
-                df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=30)
+                df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=35)
                 if df.empty:
                     continue
                 signal = self.strategy.check_signal(df)
@@ -300,15 +318,12 @@ class MomentumHunterBot:
             time.sleep(config.SCAN_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
-    # Start Keep-Alive Server on PORT (Port 10000 on Render)
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
     
-    # Start Self-Ping Thread to avoid Render Free Tier 15-min idle sleep
     ping_thread = threading.Thread(target=self_ping_worker, daemon=True)
     ping_thread.start()
     
-    # Start Interactive Telegram Command Listener (/status, /positions, /balance)
     tg_thread = threading.Thread(target=telegram_helper.handle_telegram_commands, daemon=True)
     tg_thread.start()
     

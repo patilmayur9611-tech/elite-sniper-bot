@@ -121,8 +121,105 @@ class DeltaClient:
         except Exception:
             return 0.0
 
-    def generate_signature(self, secret: str, method: str, path: str, timestamp: str, payload: str = "") -> str:
-        """HMAC SHA256 Signature for Delta Exchange India Authenticated API"""
-        message = method + timestamp + path + payload
-        signature = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).hexdigest()
-        return signature
+    # ==============================================================================
+    # 🔴 REAL MONEY TRADING (DELTA EXCHANGE INDIA AUTHENTICATED API)
+    # ==============================================================================
+
+    def _auth_request(self, method: str, path: str, payload_dict: dict = None):
+        """Sends authenticated request to Delta Exchange India using HMAC SHA256"""
+        timestamp = str(int(time.time()))
+        body = json.dumps(payload_dict) if payload_dict else ""
+        
+        signature_data = method + timestamp + path + body
+        signature = hmac.new(
+            config.DELTA_API_SECRET.encode('utf-8'),
+            signature_data.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        auth_headers = {
+            "api-key": config.DELTA_API_KEY,
+            "signature": signature,
+            "timestamp": timestamp,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        url = f"{self.base_url}{path}"
+        try:
+            if method == "GET":
+                r = requests.get(url, headers=auth_headers, timeout=10)
+            elif method == "POST":
+                r = requests.post(url, data=body, headers=auth_headers, timeout=10)
+            elif method == "DELETE":
+                r = requests.delete(url, data=body, headers=auth_headers, timeout=10)
+            return r.json()
+        except Exception as e:
+            print(f"❌ [AUTH API ERROR] {method} {path}: {e}")
+            return None
+
+    def get_real_wallet_balance(self) -> float:
+        """Fetches real INR / USD available balance on Delta India"""
+        if config.PAPER_TRADING:
+            return self.paper_state.get("wallet_balance", config.TOTAL_WALLET_CAPITAL)
+        res = self._auth_request("GET", "/v2/wallet/balances")
+        if res and res.get("success"):
+            for b in res.get("result", []):
+                if b.get("asset_symbol") in ["INR", "USD"]:
+                    return float(b.get("available_balance", 0.0))
+        return 0.0
+
+    def execute_real_order(self, symbol: str, side: str, size: int, sl_price: float, tp1_price: float):
+        """Places live market order with attached bracket stop-loss and take-profit on Delta India"""
+        spec = self.products.get(symbol)
+        if not spec:
+            print(f"❌ Cannot place real order: {symbol} spec missing.")
+            return None
+
+        payload = {
+            "product_id": spec['id'],
+            "size": size,
+            "side": "buy" if side.upper() in ["BUY", "LONG"] else "sell",
+            "order_type": "market_order",
+            "stop_loss_price": str(self.round_price(symbol, sl_price)),
+            "take_profit_price": str(self.round_price(symbol, tp1_price))
+        }
+
+        res = self._auth_request("POST", "/v2/orders", payload)
+        if res and res.get("success"):
+            print(f"🔥 [REAL ORDER SUCCESS] {side} {size} {symbol}: Order ID {res.get('result', {}).get('id')}")
+            telegram_helper.send_alert(
+                f"🔥 *[REAL ORDER PLACED ON DELTA INDIA]*\n\n"
+                f"• *Symbol:* `{symbol}` ({side})\n"
+                f"• *Contracts:* `{size}`\n"
+                f"• *Stop-Loss:* `{sl_price}`\n"
+                f"• *TP1:* `{tp1_price}`\n"
+                f"• *Status:* `SUBMITTED TO EXCHANGE`"
+            )
+            return res.get("result")
+        else:
+            err = res.get("error", "Unknown error") if res else "Network timeout"
+            print(f"❌ [REAL ORDER REJECTED] {symbol}: {err}")
+            telegram_helper.send_alert(f"❌ *[REAL ORDER REJECTED]*\n{symbol} order failed: `{err}`")
+            return None
+
+    def close_real_position(self, symbol: str, side: str, size: int):
+        """Closes live open position with a market order"""
+        spec = self.products.get(symbol)
+        if not spec:
+            return None
+
+        # To close a BUY, we SELL; to close a SELL, we BUY
+        close_side = "sell" if side.upper() in ["BUY", "LONG"] else "buy"
+        payload = {
+            "product_id": spec['id'],
+            "size": size,
+            "side": close_side,
+            "order_type": "market_order"
+        }
+
+        res = self._auth_request("POST", "/v2/orders", payload)
+        if res and res.get("success"):
+            print(f"✅ [REAL POSITION CLOSED] {symbol} {close_side} {size} contracts")
+            return res.get("result")
+        return None
