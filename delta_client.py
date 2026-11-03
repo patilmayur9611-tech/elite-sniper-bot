@@ -7,6 +7,7 @@ import requests
 import pandas as pd
 import config
 import telegram_helper
+import ai_advisor
 
 class DeltaClient:
     def __init__(self):
@@ -86,9 +87,10 @@ class DeltaClient:
 
     def calculate_contracts(self, symbol: str, price: float) -> int:
         spec = self.products.get(symbol)
-        if not spec or price <= 0:
+        if not spec or price <= 0 or spec.get('contract_value', 0) <= 0:
             return 1
-        notional_usd = config.POSITION_NOTIONAL_INR / config.USD_INR_RATE
+        size_mult = ai_advisor.get_position_size_multiplier()
+        notional_usd = (config.POSITION_NOTIONAL_INR * size_mult) / config.USD_INR_RATE
         contract_val_usd = price * spec['contract_value']
         contracts = int(round(notional_usd / contract_val_usd))
         return max(1, contracts)
