@@ -338,8 +338,8 @@ class MomentumHunterBot:
                 if not ticker_data:
                     continue
                     
-                # 2. Fetch candles (35 periods)
-                df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=35)
+                # 2. Fetch candles (100 periods for proper EMA50 and Squeeze calculation)
+                df = self.client.fetch_candles(sym, resolution=config.CANDLE_TIMEFRAME, count=100)
                 if df.empty:
                     continue
                     

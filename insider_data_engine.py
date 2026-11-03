@@ -24,7 +24,7 @@ class InsiderDataEngine:
     def check_btc_regime(self) -> float:
         """
         Fetches BTC 15-minute price change from Binance Futures.
-        If BTC is in a flash dump (< -0.6%), altcoins must NOT be longed!
+        If BTC is in a flash dump (< -0.8%), altcoins must NOT be longed!
         Caches for 60 seconds to prevent rate limit hits.
         """
         now = time.time()
@@ -35,7 +35,6 @@ class InsiderDataEngine:
             url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=2"
             r = requests.get(url, headers=self.headers, timeout=4).json()
             if r and len(r) >= 2:
-                # Compare current close to previous candle open
                 prev_open = float(r[0][1])
                 curr_close = float(r[1][4])
                 self.btc_trend_15m = (curr_close - prev_open) / prev_open * 100
@@ -112,14 +111,14 @@ class InsiderDataEngine:
         # ==============================================================================
         # CRITICAL HARD GUARDS (IMMEDIATE DISQUALIFICATION)
         # ==============================================================================
-        if spread > 0.15:
-            return {'passed': False, 'score': 0, 'reason': f"REJECTED: Spread too wide ({spread:.3f}% > 0.15%)"}
+        if spread > 0.20:
+            return {'passed': False, 'score': 0, 'reason': f"REJECTED: Spread too wide ({spread:.3f}% > 0.20%)"}
 
-        if turnover > 0 and turnover < 250000:
-            return {'passed': False, 'score': 0, 'reason': f"REJECTED: Low Delta volume (${turnover:,.0f} < $250k)"}
+        if turnover > 0 and turnover < 80000:
+            return {'passed': False, 'score': 0, 'reason': f"REJECTED: Low Delta volume (${turnover:,.0f} < $80k)"}
 
         # BTC Flash Dump Guard (For Longs)
-        if side == 'BUY' and btc_15m < -0.60:
+        if side == 'BUY' and btc_15m < -0.80:
             return {'passed': False, 'score': 0, 'reason': f"REJECTED: BTC Flash Dump ({btc_15m:.2f}% in 15m)"}
 
         # ==============================================================================
@@ -130,30 +129,30 @@ class InsiderDataEngine:
             if bid_imb >= 0.55:
                 score += 25
                 reasons.append(f"Delta Bids Heavy ({bid_imb*100:.0f}%)")
-            elif bid_imb >= 0.45:
+            elif bid_imb >= 0.40:
                 score += 15
                 reasons.append(f"Delta Bids Balanced ({bid_imb*100:.0f}%)")
             else:
-                reasons.append(f"Delta Asks Heavy ({ (1-bid_imb)*100:.0f}%)")
+                reasons.append(f"Delta Asks Heavy ({(1-bid_imb)*100:.0f}%)")
 
             # 2. Binance Global Taker CVD Aggression [Max 30 pts]
-            if cvd >= 1.20:
+            if cvd >= 1.15:
                 score += 30
                 reasons.append(f"Aggressive Buyers (CVD {cvd:.2f}x)")
-            elif cvd >= 1.05:
+            elif cvd >= 1.00:
                 score += 20
-                reasons.append(f"Buyers Dominating (CVD {cvd:.2f}x)")
-            elif cvd >= 0.95:
+                reasons.append(f"Buyers Active (CVD {cvd:.2f}x)")
+            elif cvd >= 0.90:
                 score += 5
             else:
-                score -= 15  # Heavy market sellers dumping!
+                score -= 15
                 reasons.append(f"Sellers Active (CVD {cvd:.2f}x)")
 
             # 3. Binance Top Trader Whale Sentiment [Max 25 pts]
-            if top_whales >= 1.30:
+            if top_whales >= 1.25:
                 score += 25
                 reasons.append(f"Whales Net Long ({top_whales:.2f}x)")
-            elif top_whales >= 1.10:
+            elif top_whales >= 1.05:
                 score += 15
                 reasons.append(f"Whales Leaning Long ({top_whales:.2f}x)")
             elif top_whales <= 0.85:
@@ -161,14 +160,14 @@ class InsiderDataEngine:
                 reasons.append(f"Whales Shorting ({top_whales:.2f}x)")
 
             # 4. Open Interest Inflow Trend [Max 10 pts]
-            if oi_chg > 0.05:
+            if oi_chg > 0.02:
                 score += 10
                 reasons.append(f"Fresh Money Inflow (OI {oi_chg:+.2f}%)")
-            elif oi_chg >= -0.10:
+            elif oi_chg >= -0.15:
                 score += 5
 
             # 5. Funding Squeeze Fuel Bonus [Max 10 pts]
-            if funding < -0.01:
+            if funding < -0.005:
                 score += 10
                 reasons.append(f"Short Squeeze Fuel (Funding {funding*100:.3f}%)")
 
@@ -177,25 +176,25 @@ class InsiderDataEngine:
             if bid_imb <= 0.45:
                 score += 25
                 reasons.append(f"Delta Asks Heavy ({(1-bid_imb)*100:.0f}%)")
-            elif bid_imb <= 0.55:
+            elif bid_imb <= 0.60:
                 score += 15
                 reasons.append(f"Delta Depth Balanced")
 
             # 2. Binance Global Taker CVD Aggression [Max 30 pts]
-            if cvd <= 0.80:
+            if cvd <= 0.85:
                 score += 30
                 reasons.append(f"Aggressive Sellers (CVD {cvd:.2f}x)")
-            elif cvd <= 0.95:
+            elif cvd <= 1.00:
                 score += 20
                 reasons.append(f"Sellers Dominating (CVD {cvd:.2f}x)")
-            elif cvd <= 1.05:
+            elif cvd <= 1.10:
                 score += 5
             else:
                 score -= 15
                 reasons.append(f"Buyers Absorbing (CVD {cvd:.2f}x)")
 
             # 3. Binance Top Trader Whale Sentiment [Max 25 pts]
-            if top_whales <= 0.80:
+            if top_whales <= 0.85:
                 score += 25
                 reasons.append(f"Whales Net Short ({top_whales:.2f}x)")
             elif top_whales <= 0.95:
@@ -203,19 +202,19 @@ class InsiderDataEngine:
                 reasons.append(f"Whales Leaning Short ({top_whales:.2f}x)")
 
             # 4. Open Interest Inflow Trend [Max 10 pts]
-            if oi_chg > 0.05:
+            if oi_chg > 0.02:
                 score += 10
                 reasons.append(f"Short Accumulation (OI {oi_chg:+.2f}%)")
-            elif oi_chg >= -0.10:
+            elif oi_chg >= -0.15:
                 score += 5
 
             # 5. High Positive Funding [Max 10 pts]
-            if funding > 0.05:
+            if funding > 0.03:
                 score += 10
                 reasons.append(f"Long Squeeze Danger (Funding {funding*100:.3f}%)")
 
-        # Threshold: Trade requires >= 60 points of multi-source confluence!
-        passed = score >= 60
+        # Threshold: 45 points provides solid institutional confirmation without paralyzing the bot
+        passed = score >= 45
         summary_str = " | ".join(reasons)
         
         return {

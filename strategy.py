@@ -29,9 +29,12 @@ class MomentumStrategy:
         # 5. Bollinger Band Squeeze (Volatility Compression)
         df['bb_mid'] = df['close'].rolling(20).mean()
         df['bb_std'] = df['close'].rolling(20).std()
-        df['bb_width'] = (4 * df['bb_std']) / df['bb_mid']
+        df['bb_width'] = (4 * df['bb_std']) / (df['bb_mid'] + 1e-8)
         df['bb_width_sma'] = df['bb_width'].rolling(20).mean()
-        df['is_squeeze'] = df['bb_width'].shift(1) <= df['bb_width_sma'].shift(1)
+        # Fallback if bb_width_sma has any NaN: compare to expanding mean
+        fallback_sma = df['bb_width'].expanding().mean()
+        effective_sma = df['bb_width_sma'].fillna(fallback_sma)
+        df['is_squeeze'] = df['bb_width'].shift(1) <= effective_sma.shift(1)
         
         # 6. Candle Anatomy (Wick and Body Ratios)
         candle_range = df['high'] - df['low'] + 1e-8
@@ -48,7 +51,7 @@ class MomentumStrategy:
         Requires BOTH Candlestick Microstructure AND Multi-Source Insider Order-Flow Confluence.
         Zero Blind Trades: If insider data does not confirm, the trade is rejected!
         """
-        if len(df) < 25:
+        if len(df) < 40:
             return None
             
         # ==============================================================================
@@ -56,11 +59,11 @@ class MomentumStrategy:
         # ==============================================================================
         if ticker:
             spread = ticker.get('spread_pct', 0.0)
-            if spread > 0.15:
+            if spread > 0.20:
                 return None
                 
             turnover = ticker.get('turnover_usd', 0.0)
-            if turnover > 0 and turnover < 250000:
+            if turnover > 0 and turnover < 100000:
                 return None
 
         df = MomentumStrategy.calculate_indicators(df)
@@ -70,26 +73,24 @@ class MomentumStrategy:
         live_now = df.iloc[-1]
         
         candle_pct = (closed['close'] - closed['open']) / closed['open']
-        atr = closed['atr14']
+        atr = closed['atr14'] if not np.isnan(closed['atr14']) else (closed['high'] - closed['low'])
         candle_time = str(closed['t'])
         
         # Microstructure Depth from Ticker
         bid_imbalance = ticker.get('bid_imbalance', 0.50) if ticker else 0.50
-        funding_rate = ticker.get('funding_rate', 0.0) if ticker else 0.0
         
         candidate_signal = None
         
         # ==============================================================================
-        # ENGINE 1: INSTITUTIONAL SWEEP & RECLAIM (10.89 PROFIT FACTOR ALPHA)
+        # ENGINE 1: INSTITUTIONAL SWEEP & RECLAIM
         # ==============================================================================
-        
-        # Bullish Sweep: Price sweeps 20-candle low, hunts stops, reclaims with lower wick >= 40%
+        # Bullish Sweep: Price sweeps 20-candle low, hunts stops, reclaims with lower wick >= 35%
         if (closed['low'] < closed['ll20'] and 
             closed['close'] > closed['ll20'] and 
-            closed['lower_wick'] >= 0.40 and 
-            closed['rvol'] >= 2.0 and 
-            closed['close'] > closed['ema50'] and 
-            bid_imbalance >= 0.40):
+            closed['close'] > closed['open'] and 
+            closed['lower_wick'] >= 0.35 and 
+            closed['rvol'] >= 1.4 and 
+            bid_imbalance >= 0.38):
             
             sl = closed['low'] - (0.15 * atr)
             tp1 = closed['close'] + (1.8 * atr)
@@ -103,13 +104,13 @@ class MomentumStrategy:
                 'setup': 'Bullish Sweep Reclaim'
             }
             
-        # Bearish Sweep: Price sweeps 20-candle high, traps breakout buyers, reclaims with upper wick >= 40%
+        # Bearish Sweep: Price sweeps 20-candle high, traps breakout buyers, reclaims with upper wick >= 35%
         elif (closed['high'] > closed['hh20'] and 
               closed['close'] < closed['hh20'] and 
-              closed['upper_wick'] >= 0.40 and 
-              closed['rvol'] >= 2.0 and 
-              closed['close'] < closed['ema50'] and 
-              bid_imbalance <= 0.60):
+              closed['close'] < closed['open'] and 
+              closed['upper_wick'] >= 0.35 and 
+              closed['rvol'] >= 1.4 and 
+              bid_imbalance <= 0.62):
               
             sl = closed['high'] + (0.15 * atr)
             tp1 = closed['close'] - (1.8 * atr)
@@ -127,16 +128,15 @@ class MomentumStrategy:
         # ENGINE 2: PRECISION SQUEEZE BREAKOUT (SOLID BODY & COMPRESSION)
         # ==============================================================================
         if not candidate_signal:
-            # Bullish Breakout: Squeeze + Solid Green Body + High Volume + Bid Depth >= 45%
-            if (closed['rvol'] >= 3.0 and 
+            # Bullish Breakout: Squeeze + Solid Green Body + Healthy Volume + Bid Depth >= 40%
+            if (closed['rvol'] >= 1.8 and 
                 closed['close'] > closed['hh20'] and 
-                candle_pct >= 0.005 and 
-                closed['upper_wick'] <= 0.25 and 
-                closed['body_ratio'] >= 0.50 and 
-                closed['close'] > closed['ema50'] and 
-                closed['ema20'] > closed['ema50'] and 
+                candle_pct >= 0.004 and 
+                closed['upper_wick'] <= 0.35 and 
+                closed['body_ratio'] >= 0.45 and 
+                closed['close'] > closed['ema20'] and 
                 closed['is_squeeze'] and 
-                bid_imbalance >= 0.45):
+                bid_imbalance >= 0.40):
                 
                 entry_level = max(closed['hh20'], closed['ema9'])
                 sl = entry_level - (1.1 * atr)
@@ -151,16 +151,15 @@ class MomentumStrategy:
                     'setup': 'Solid Squeeze Breakout'
                 }
                 
-            # Bearish Breakdown: Squeeze + Solid Red Body + High Sell Volume + Ask Depth >= 45%
-            elif (closed['rvol'] >= 3.0 and 
+            # Bearish Breakdown: Squeeze + Solid Red Body + Healthy Sell Volume + Ask Depth >= 40%
+            elif (closed['rvol'] >= 1.8 and 
                   closed['close'] < closed['ll20'] and 
-                  candle_pct <= -0.005 and 
-                  closed['lower_wick'] <= 0.25 and 
-                  closed['body_ratio'] >= 0.50 and 
-                  closed['close'] < closed['ema50'] and 
-                  closed['ema20'] < closed['ema50'] and 
+                  candle_pct <= -0.004 and 
+                  closed['lower_wick'] <= 0.35 and 
+                  closed['body_ratio'] >= 0.45 and 
+                  closed['close'] < closed['ema20'] and 
                   closed['is_squeeze'] and 
-                  bid_imbalance <= 0.55):
+                  bid_imbalance <= 0.60):
                   
                 entry_level = min(closed['ll20'], closed['ema9'])
                 sl = entry_level + (1.1 * atr)
@@ -181,10 +180,8 @@ class MomentumStrategy:
         # ==============================================================================
         # 3. ENFORCE INSTITUTIONAL INSIDER CONFLUENCE (MANDATORY)
         # ==============================================================================
-        # If insider data is available, verify it. Reject trade if confluence fails!
         if insider_conf:
             if not insider_conf.get('passed', False):
-                # Trade rejected because insider order-flow does not support it!
                 return None
             
             score = insider_conf.get('score', 0)

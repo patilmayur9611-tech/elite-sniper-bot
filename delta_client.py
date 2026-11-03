@@ -93,12 +93,12 @@ class DeltaClient:
         contracts = int(round(notional_usd / contract_val_usd))
         return max(1, contracts)
 
-    def fetch_candles(self, symbol: str, resolution: str = config.CANDLE_TIMEFRAME, count: int = 35) -> pd.DataFrame:
+    def fetch_candles(self, symbol: str, resolution: str = config.CANDLE_TIMEFRAME, count: int = 100) -> pd.DataFrame:
         end_t = int(time.time())
         start_t = end_t - (count * 300)
         url = f"{self.base_url}/v2/chart/history?resolution={resolution}&symbol={symbol}&from={start_t}&to={end_t}"
         try:
-            r = requests.get(url, headers=self.headers, timeout=6)
+            r = requests.get(url, headers=self.headers, timeout=8)
             if r.status_code == 200:
                 res = r.json().get('result', {})
                 if 'c' in res and len(res['c']) >= 20:
